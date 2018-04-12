@@ -32,7 +32,7 @@ from utilz import logger
 from utilz import PAD, pad_seq, word_tokenize
 from utilz import VOCAB
 from utilz import Sample
-from utilz import LongVar, Var
+from utilz import LongVar, Var, init_hidden
 from vocab import Vocab
 
 import numpy as np
@@ -111,13 +111,17 @@ def accuracy(output, target, *args, **kwargs):
     log.debug('i, o sizes: {} {}'.format(output.size(), target.size()))
     return (output == target).sum().float()/output.size(0)
 
-def repr_function(output, feed, batch_index, VOCAB, LABELS, raw_samples):
+def repr_function(output, feed, batch_index, VOCAB, raw_samples):
     results = []
     output = output.data.max(dim=-1)[1].cpu().numpy()
-    indices, (seq, ), (labels,) = feed.nth_batch(batch_index)
-    for idx, op, se, la in zip(indices, output, seq, labels):
-        #sample = list(filter(lambda x: x.id == int(str(idx).split('.')[0]), raw_samples))[0]
-        results.append([ ' '.join(feed.data_dict[idx].tokens), feed.data_dict[idx].sentiment, LABELS[op] ])
+    indices, (context, question), (a_start, a_end) = feed.nth_batch(batch_index)
+    for idx, op, a_s, a_e in zip(indices, output, a_start, a_end):
+        sample = feed.data_dict[idx]
+        results.append([ ' '.join(sample.context),
+                         ' '.join(sample.q),
+                         ' '.join(sample.context[sample.a_start]: sample.a_end])
+                         ' '.join(sample.context[          op[0]: op[1]       ])
+        ])
 
     return results
 
@@ -174,33 +178,22 @@ class Encoder(Base):
     def __init__(self, Config, input_vocab_size):
         super(Encoder, self).__init__()
 
-        self.embed_dim = Config.embed_dim
-        self.hidden_dim = Config.hidden_dim
-        self.embed = nn.Embedding(input_vocab_size, self.embed_dim)
+        self.embed_size = Config.embed_size
+        self.hidden_size = Config.hidden_size
+        self.embed = nn.Embedding(input_vocab_size, self.embed_size)
 
-        self.encode = nn.LSTM(      self.embed_dim, self.hidden_dim, bidirectional=True)
-        self.attend = nn.LSTM(4 * self.hidden_dim, self.hidden_dim, bidirectional=True)
+        self.encode = nn.LSTM(     self.embed_size, self.hidden_size, bidirectional=True)
+        self.attend = nn.LSTM(4 * self.hidden_size, self.hidden_size, bidirectional=True)
 
-        self.linear = nn.Linear(2 * self.hidden_dim, 2 * self.hidden_dim)
+        self.linear = nn.Linear(2 * self.hidden_size, 2 * self.hidden_size)
         
         self.dropout = nn.Dropout(0.1)
 
         if Config.cuda:
             self.cuda()
 
-    def init_hidden(self, batch_size, cell):
-        layers = cell.num_layers
-        if cell.bidirectional:
-            layers = layers * 2 
-        hidden  = Variable(torch.zeros(layers, batch_size, cell.hidden_size))
-        context = Variable(torch.zeros(layers, batch_size, cell.hidden_size))
-        if Config.cuda:
-            hidden  = hidden.cuda()
-            context = context.cuda()
-        return hidden, context
-
     def sentinel(self, batch_size=1):
-        s = Variable(torch.zeros(batch_size, 1, 2 * self.hidden_dim))
+        s = Variable(torch.zeros(batch_size, 1, 2 * self.hidden_size))
         if Config.cuda:
             s = s.cuda()
 
@@ -218,14 +211,14 @@ class Encoder(Base):
         question = self.__( self.embed(question), 'question_emb')
 
         context  = context.transpose(1,0)
-        C, _  = self.__(  self.encode(context, self.init_hidden(batch_size, self.encode)), 'C')
+        C, _  = self.__(  self.encode(context, init_hidden(batch_size, self.encode)), 'C')
         C     = self.__(  C.transpose(1,0), 'C')
         s     = self.__(  self.sentinel(batch_size), 's')
         C     = self.__(  torch.cat([C, s], dim=1), 'C')
 
         
         question  = question.transpose(1,0)
-        Q, _ = self.__(  self.encode(question, self.init_hidden(batch_size, self.encode)), 'Q')
+        Q, _ = self.__(  self.encode(question, init_hidden(batch_size, self.encode)), 'Q')
         Q    = self.__(  Q.transpose(1,0), 'Q')
         s    = self.__(  self.sentinel(batch_size), 's')
         Q    = self.__(  torch.cat([Q, s], dim=1), 'Q')
@@ -245,7 +238,7 @@ class Encoder(Base):
 
         attn_cq       = self.__(  torch.bmm(context_question.transpose(1, 2), context_attn) , 'attn_cq' )
         attn_cq       = self.__(  attn_cq.transpose(1, 2).transpose(0,1), 'attn_cq')
-        hidden        = self.__(  self.init_hidden(batch_size, self.attend), 'hidden')
+        hidden        = self.__(  init_hidden(batch_size, self.attend), 'hidden')
         final_repr, _ = self.__(  self.attend(attn_cq, hidden), 'final_repr')
 
         return final_repr[:, :-1]  #exclude sentinel
@@ -271,14 +264,14 @@ class Maxout(Base):
 class HMN(Base):
     def __init__(self, Config):
         super(HMN, self).__init__()
-        self.hidden_dim = Config.hidden_dim
+        self.hidden_size = Config.hidden_size
         self.pooling_size = Config.pooling_size
         
-        self.W_D = nn.Linear(5 * self.hidden_dim, self.hidden_dim)
+        self.W_D = nn.Linear(5 * self.hidden_size, self.hidden_size)
         
-        self.W_1 = Maxout(3 * self.hidden_dim, self.hidden_dim, self.pooling_size)
-        self.W_2 = Maxout(    self.hidden_dim, self.hidden_dim, self.pooling_size)
-        self.W_3 = Maxout(2 * self.hidden_dim, 1,                self.pooling_size)
+        self.W_1 = Maxout(3 * self.hidden_size, self.hidden_size, self.pooling_size)
+        self.W_2 = Maxout(    self.hidden_size, self.hidden_size, self.pooling_size)
+        self.W_3 = Maxout(2 * self.hidden_size, 1,               self.pooling_size)
         
     def forward(self,u_t,u_s,u_e,h):
 
@@ -288,19 +281,76 @@ class HMN(Base):
         m_3 = self.__(  self.W_3(torch.cat([m_1,m_2],1)), 'm_3'  )
         
         return m_3
-    
+
+class PtrDecoder(Base):
+    def __init__(self, Config):
+        super(PtrDecoder, self).__init__()
+        
+        self.hidden_size  = Config.hidden_size
+        self.pooling_size = Config.pooling_size
+        self.max_iter     = Config.max_iter
+
+        self.decode = nn.LSTMCell(4 * self.hidden_size, self.hidden_size)
+        
+        self.find_start = HMN(self.hidden_size, self.pooling_size)
+        self.find_end   = HMN(self.hidden_size, self.pooling_size)
+
+        self.dropout = nn.Dropout(Config.dropout)
+
+        if Config.cuda:
+            self.cuda()
+        
+    def forward(self, encoded_repr):
+        batch_size, seq_len, hidden_size = encoded_repr.size()
+        start_repr = encoder_repr[:, 0, :]
+        end_repr   = encoder_repr[:, 1, :]
+
+        hidden = init_hidden(batch_size, self.decode)
+        for i in range(self.max_iter):
+            starts, ends = [], []
+
+            for ut in encoded_repr.transpose(0, 1):
+                start = self.__( self.find_start(ut, start_repr, end_repr, hidden[0]), 'start')
+                starts.append(start)
+
+            starts = self.__( torch.stack(starts), 'starts')
+            start = starts.data.max(1)[1]
+            start_repr = torch.cat([  encoded_repr[i][ start[i] ] for i in range(seq_len)   ])
+                
+            for ut in encoded_repr.transpose(0, 1):
+                end = self.__( self.find_end(ut, end_repr, end_repr, hidden[0]), 'end')
+                ends.append(end)
+
+            ends = self.__( torch.stack(ends), 'ends')
+            end = ends.data.max(1)[1]
+            end_repr = torch.cat([  encoded_repr[i][end[i]] for i in range(seq_len)   ])
+
+            input_ = self.__( torch.cat([start_repr, end_repr], -1), 'input_')
+            hidden = self.__( self.decode(input_, hidden), 'hidden')
+
+        return starts, ends
 
 
+class DCN(Base):
+    def __init__(self, Config, input_vocab_size):
+        super(DCN, self).__init__()
+        self.encode = Encoder(Config, input_vocab_size)
+        self.decode = Decoder(Config)
+
+    def forward(self, context, question):
+        return self.decode( self.encode(context, question) )
+        
+            
 def experiment(VOCAB, raw_samples, datapoints=[[], []], eons=1000, epochs=10, checkpoint=1):
     try:
         try:
-            model =  Encoder(Config(), len(VOCAB))
+            model =  DCN(Config(), len(VOCAB))
             if Config().cuda:  model = model.cuda()
             model.load_state_dict(torch.load('{}.{}'.format(SELF_NAME, 'pth')))
             log.info('loaded the old image for the model')
         except:
             log.exception('failed to load the model')
-            model =  Encoder(Config(), len(VOCAB))
+            model =  DCN(Config(), len(VOCAB))
             if Config().cuda:  model = model.cuda()
             
         print('**** the model', model)
@@ -367,7 +417,7 @@ if __name__ == '__main__':
         vocabulary.update(_vocabulary)
         
     log.info('dataset size: {}'.format(len(dataset)))
-    #og.info('dataset[:10]: {}'.format(pformat(dataset[:10])))
+    #log.info('dataset[:10]: {}'.format(pformat(dataset[:10])))
     log.info('vocabulary: {}'.format(len(vocabulary)))
     encoder = Encoder(Config, 100)
     
