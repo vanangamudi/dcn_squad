@@ -8,7 +8,7 @@ from logger import CMDFilter
 
 import logging
 from pprint import pprint, pformat
-logging.basicConfig(format="%(levelname)-8s:%(filename)s.%(funcName)20s >>   %(message)s")
+logging.basicConfig(format="%(levelname)-8s:%(filename)s.%(name)s.%(funcName)s >>   %(message)s")
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
 
@@ -119,7 +119,7 @@ def repr_function(output, feed, batch_index, VOCAB, raw_samples):
         sample = feed.data_dict[idx]
         results.append([ ' '.join(sample.context),
                          ' '.join(sample.q),
-                         ' '.join(sample.context[sample.a_start]: sample.a_end])
+                         ' '.join(sample.context[sample.a_start: sample.a_end]),
                          ' '.join(sample.context[          op[0]: op[1]       ])
         ])
 
@@ -145,14 +145,14 @@ def batchop(datapoints, WORD2INDEX, *args, **kwargs):
     return batch
 
 class Base(nn.Module):
-    def __init__(self):
+    def __init__(self, Config, name):
         super(Base, self).__init__()
-               
-        self.log = logging.getLogger('{}.{}'.format(__name__,
-                                                    self.__class__.__name__))
-        self.size_log = logging.getLogger('{}.{}.{}'.format(__name__,
-                                                            self.__class__.__name__,
-                                                            'size'))
+        self._name = name
+        self.log = logging.getLogger(self._name)
+        size_log_name = '{}.{}'.format(self._name, 'size')
+        self.log.info('constructing logger: {}'.format(size_log_name))
+        self.size_log = logging.getLogger(size_log_name)
+        self.size_log.info('size_log')
         self.log.setLevel(logging.DEBUG)
         self.size_log.setLevel(logging.DEBUG)
        
@@ -173,10 +173,13 @@ class Base(nn.Module):
             self.size_log.debug('{} -> {}'.format(name, tensor.size()))
                 
         return tensor
+
+    def name(self, n):
+        return '{}.{}'.format(self._name, n)
     
 class Encoder(Base):
-    def __init__(self, Config, input_vocab_size):
-        super(Encoder, self).__init__()
+    def __init__(self, Config, name, input_vocab_size):
+        super(Encoder, self).__init__(Config, name)
 
         self.embed_size = Config.embed_size
         self.hidden_size = Config.hidden_size
@@ -246,45 +249,55 @@ class Encoder(Base):
         
 class Maxout(Base):
     # https://github.com/pytorch/pytorch/issues/805
-    def __init__(self, Config, d_in, d_out, pool_size):
-        super().__init__()
-        self.d_in, self.d_out, self.pool_size = d_in, d_out, pool_size
-        self.lin = nn.Linear(d_in, d_out * pool_size)
+    def __init__(self, Config, name, input_size, output_size, pool_size):
+        super(Maxout, self).__init__(Config, name)
+        self.input_size, self.output_size, self.pool_size = input_size, output_size, pool_size
+        self.lin = nn.Linear(input_size, output_size * pool_size)
 
     def forward(self, inputs):
         shape = list(inputs.size())
-        shape[-1] = self.d_out
+        shape[-1] = self.output_size
         shape.append(self.pool_size)
         max_dim = len(shape) - 1
         out = self.lin(inputs)
-        m, i = out.view(*shape).max(max_dim)
+        m = self.__( out.view(*shape), 'm' )
+        m, _ = m.max(max_dim)
         return m
     
     
 class HMN(Base):
-    def __init__(self, Config):
-        super(HMN, self).__init__()
+    def __init__(self, Config, name):
+        super(HMN, self).__init__(Config, name)
         self.hidden_size = Config.hidden_size
         self.pooling_size = Config.pooling_size
         
-        self.W_D = nn.Linear(5 * self.hidden_size, self.hidden_size)
+        self.linear = nn.Linear(5 * self.hidden_size, self.hidden_size)
         
-        self.W_1 = Maxout(3 * self.hidden_size, self.hidden_size, self.pooling_size)
-        self.W_2 = Maxout(    self.hidden_size, self.hidden_size, self.pooling_size)
-        self.W_3 = Maxout(2 * self.hidden_size, 1,               self.pooling_size)
+        self.W_1 = Maxout(Config, self.name('W_1'), 3 * self.hidden_size, self.hidden_size, self.pooling_size)
+        self.W_2 = Maxout(Config, self.name('W_2'),    self.hidden_size, self.hidden_size, self.pooling_size)
+        self.W_3 = Maxout(Config, self.name('W_3'), 2 * self.hidden_size, 1,               self.pooling_size)
         
-    def forward(self,u_t,u_s,u_e,h):
+    def forward(self, ut, start_repr, end_repr, hidden):
 
-        r   = self.__(  F.tanh(self.W_D(torch.cat([u_s,u_e,h],1))), 'r'  )
-        m_1 = self.__(  self.W_1(torch.cat([u_t,r],1)), 'm_1'  )
-        m_2 = self.__(  self.W_2(m_1), 'm_2'  )
-        m_3 = self.__(  self.W_3(torch.cat([m_1,m_2],1)), 'm_3'  )
+        self.__(start_repr, 'start_repr')
+        self.__(end_repr, 'end_repr')
+        self.__(hidden, 'hidden')
         
-        return m_3
+        r = self.__(  torch.cat( [start_repr, end_repr, hidden], dim=1 ), 'r'  )
+        r = self.__(  F.tanh(self.linear(r))                        , 'r'  )
+
+        ut_r = self.__(  torch.cat([ut, r], dim=1), 'ut_r')
+        
+        m1 = self.__(  self.W_1(ut_r), 'm1'  )
+        m2 = self.__(  self.W_2(m1), 'm2'  )
+
+        m3 = self.__(  torch.cat([m1, m2], dim=1), 'm3')
+        return  self.__(  self.W_3(m3), 'm3'  )
+        
 
 class PtrDecoder(Base):
-    def __init__(self, Config):
-        super(PtrDecoder, self).__init__()
+    def __init__(self, Config, name):
+        super(PtrDecoder, self).__init__(Config, name)
         
         self.hidden_size  = Config.hidden_size
         self.pooling_size = Config.pooling_size
@@ -292,8 +305,8 @@ class PtrDecoder(Base):
 
         self.decode = nn.LSTMCell(4 * self.hidden_size, self.hidden_size)
         
-        self.find_start = HMN(self.hidden_size, self.pooling_size)
-        self.find_end   = HMN(self.hidden_size, self.pooling_size)
+        self.find_start = HMN(Config, self.name('find_start'))
+        self.find_end   = HMN(Config, self.name('find_end'))
 
         self.dropout = nn.Dropout(Config.dropout)
 
@@ -302,10 +315,10 @@ class PtrDecoder(Base):
         
     def forward(self, encoded_repr):
         batch_size, seq_len, hidden_size = encoded_repr.size()
-        start_repr = encoder_repr[:, 0, :]
-        end_repr   = encoder_repr[:, 1, :]
+        start_repr = encoded_repr[:, 0, :]
+        end_repr   = encoded_repr[:, 1, :]
 
-        hidden = init_hidden(batch_size, self.decode)
+        hidden = self.__(  init_hidden(batch_size, self.decode), 'hidden'  )
         for i in range(self.max_iter):
             starts, ends = [], []
 
@@ -332,10 +345,10 @@ class PtrDecoder(Base):
 
 
 class DCN(Base):
-    def __init__(self, Config, input_vocab_size):
-        super(DCN, self).__init__()
-        self.encode = Encoder(Config, input_vocab_size)
-        self.decode = Decoder(Config)
+    def __init__(self, Config, name, input_vocab_size):
+        super(DCN, self).__init__(Config, name)
+        self.encode = Encoder(Config, self.name('encode'), input_vocab_size)
+        self.decode = PtrDecoder(Config, self.name('decode'))
 
     def forward(self, context, question):
         return self.decode( self.encode(context, question) )
@@ -344,13 +357,13 @@ class DCN(Base):
 def experiment(VOCAB, raw_samples, datapoints=[[], []], eons=1000, epochs=10, checkpoint=1):
     try:
         try:
-            model =  DCN(Config(), len(VOCAB))
+            model =  DCN(Config(), 'model', len(VOCAB))
             if Config().cuda:  model = model.cuda()
             model.load_state_dict(torch.load('{}.{}'.format(SELF_NAME, 'pth')))
             log.info('loaded the old image for the model')
         except:
             log.exception('failed to load the model')
-            model =  DCN(Config(), len(VOCAB))
+            model =  DCN(Config(), 'model', len(VOCAB))
             if Config().cuda:  model = model.cuda()
             
         print('**** the model', model)
@@ -419,7 +432,6 @@ if __name__ == '__main__':
     log.info('dataset size: {}'.format(len(dataset)))
     #log.info('dataset[:10]: {}'.format(pformat(dataset[:10])))
     log.info('vocabulary: {}'.format(len(vocabulary)))
-    encoder = Encoder(Config, 100)
     
     VOCAB = Vocab(vocabulary, VOCAB)
     
