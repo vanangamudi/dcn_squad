@@ -14,7 +14,7 @@ from debug import memory_consumed
 
 class DataFeed(object):
 
-    def __init__(self, name, datapoints, batchop, batch_size=1, ids=None, sort_key=None):
+    def __init__(self, name, datapoints, batchop, batch_size=1, sort_key=None):
         self.name        = name
         self._offset     = 0
         self._size       = len(datapoints)
@@ -22,7 +22,6 @@ class DataFeed(object):
         self._batchop    = batchop
         self._batch_cache = {}
         self._exhausted_count = 0
-        self.key_indices = ids
         if len(datapoints):
             if sort_key:
                 datapoints = sorted(datapoints, key=sort_key)
@@ -46,11 +45,7 @@ class DataFeed(object):
         self.reset_offset()
 
         for d in datapoints:
-            if self.key_indices:
-                _id = (d[i] for i in self.key_indices)
-                self._data_dict[_id] = d
-            else:
-                self._data_dict[d.id] = d
+            self._data_dict[d.id] = d
 
     @property
     def data(self):
@@ -143,11 +138,7 @@ class MultiplexedDataFeed(DataFeed):
 
         for datafeed in self.datafeeds:            
             for d in datafeed.data:
-                if self.key_indices:
-                    _id = (d[i] for i in self.key_indices)
-                    self._data_dict[_id] = d
-                else:
-                    self._data_dict[d.id] = d
+                self._data_dict[d.id] = d
 
 
     @property
