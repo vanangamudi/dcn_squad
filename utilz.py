@@ -8,6 +8,7 @@ log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
 
 import torch
+from torch import nn
 from torch.autograd import Variable
 
 from collections import namedtuple, defaultdict
@@ -147,3 +148,19 @@ def Var(Config, array):
         ret = ret.cuda()
 
     return ret
+
+def init_hidden(batch_size, cell):
+
+    layers = 1
+    if not isinstance(cell, (nn.LSTMCell, nn.GRUCell)):
+        layers = cell.num_layers
+        if cell.bidirectional:
+            layers = layers * 2
+        
+    hidden  = Variable(torch.zeros(layers, batch_size, cell.hidden_size))
+    context = Variable(torch.zeros(layers, batch_size, cell.hidden_size))
+    
+    if Config.cuda:
+        hidden  = hidden.cuda()
+        context = context.cuda()
+    return hidden, context
