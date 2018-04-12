@@ -139,7 +139,7 @@ class Trainer(object):
 
     def save_best_model(self):
         log.info('saving the last best model...')
-        torch.save(self.best_model[1], '{}.{}'.format(self.name, '.pth'))
+        torch.save(self.best_model[1], '{}.{}'.format(self.name, 'pth'))
         
     def train(self, test_drive=False):
         self.runner.model.train()
@@ -152,6 +152,7 @@ class Trainer(object):
                 return
             
             for j in tqdm(range(self.feeder.train.num_batch)):
+                log.debug('{}th batch'.format(j))
                 self.optimizer.zero_grad()
                 _, i, t = self.feeder.train.next_batch()
                 output = self.runner.run(i)
@@ -254,5 +255,5 @@ class Predictor(object):
         output = self.runner.run(i)
         results = ListTable()
         results.extend( self.repr_function(output, self.feed, batch_index) )
-        output_ = output.data
+        output_ = output
         return output_, results
