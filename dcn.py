@@ -40,7 +40,7 @@ from tokenstring import TokenString
 
 SELF_NAME = os.path.basename(__file__).replace('.py', '')
 
-def load_squad_data(data_path, max_para_len=600, max_ans_len=10):
+def load_squad_data(data_path, ids, max_para_len=600, max_ans_len=10):
     dataset = json.load(open(data_path,'r'))
     samples = []
     qn, an = 0, 0
@@ -69,10 +69,9 @@ def load_squad_data(data_path, max_para_len=600, max_ans_len=10):
                 
                 for qid, qa in enumerate(questions):
                     log.debug('processing: {}.{}.{}'.format(aid, pid, qid))
-                    _id = qa['id']
                     q = TokenString(__(qa['question']), word_tokenize).delete_whitespace()
                     a = TokenString(__(qa['answers'][0]['text']), word_tokenize).delete_whitespace()  #simply ignore other answers
-                    
+                    squad_id = qa['id']
                     for token in q:
                         vocabulary[token] += 1
 
@@ -87,7 +86,9 @@ def load_squad_data(data_path, max_para_len=600, max_ans_len=10):
                         continue
                         
                     a_start, a_end = indices
-                    samples.append(Sample(_id, aid, pid, qid, _id, context, q, a, a_start, a_end))
+                    fields = (aid, pid, qid, squad_id, context, q, a, a_start, a_end)
+                    _id = tuple( fields[i-1] for i in ids )
+                    samples.append(Sample(_id, *fields))
     except:
         skipped += 1
         log.exception('{}'.format(aid))
@@ -98,11 +99,20 @@ def load_squad_data(data_path, max_para_len=600, max_ans_len=10):
 
 # ## Loss and accuracy function
 def loss(output, target, loss_function=nn.NLLLoss(), scale=1, *args, **kwargs):
-    target = Variable(torch.LongTensor(target[0]), requires_grad=False)
-    if Config().cuda: target = target.cuda()
-    log.debug('i, o sizes: {} {}'.format(output.size(), target.size()))
+    starts_target, ends_target = target
+    starts_target, ends_target = LongVar(Config, starts_target), LongVar(Config, ends_target)
+    
+    starts_output, ends_output = output
+    if Config().cuda:
+        starts_target, ends_target = starts_target.cuda(), ends_target.cuda()
+        
+    log.debug('i, o sizes: {} {}'.format(starts_target.size(), ends_target.size()))
+    log.debug('i, o sizes: {} {}'.format(starts_output.size(), ends_output.size()))
 
-    return loss_function(output, target)
+    loss  = loss_function(starts_output, starts_target)
+    loss += loss_function(ends_output, ends_target)
+    
+    return loss
 
 def accuracy(output, target, *args, **kwargs):
     output = output.max(-1)[1]
@@ -113,14 +123,18 @@ def accuracy(output, target, *args, **kwargs):
 
 def repr_function(output, feed, batch_index, VOCAB, raw_samples):
     results = []
-    output = output.data.max(dim=-1)[1].cpu().numpy()
+    starts, ends = output
+    starts = starts.data.max(dim=-1)[1].cpu().numpy()
+    ends = ends.data.max(dim=-1)[1].cpu().numpy()
+    
     indices, (context, question), (a_start, a_end) = feed.nth_batch(batch_index)
-    for idx, op, a_s, a_e in zip(indices, output, a_start, a_end):
+
+    for idx, p_s, p_e, a_s, a_e in zip(indices, starts, ends, a_start, a_end):
         sample = feed.data_dict[idx]
         results.append([ ' '.join(sample.context),
                          ' '.join(sample.q),
                          ' '.join(sample.context[sample.a_start: sample.a_end]),
-                         ' '.join(sample.context[          op[0]: op[1]       ])
+                         ' '.join(sample.context[          p_s: p_e       ])
         ])
 
     return results
@@ -134,14 +148,13 @@ def batchop(datapoints, WORD2INDEX, *args, **kwargs):
     for d in datapoints:
         context.append([WORD2INDEX[w] for w in d.context])
         question.append([WORD2INDEX[w] for w in d.q])
-        answer_start.append([d.a_start])
-        answer_end.append([d.a_end])
+        answer_start.append(d.a_start)
+        answer_end.append(d.a_end)
         
     context = pad_seq(context)
     question = pad_seq(question)
 
     batch = indices, (np.array(context), np.array(question)), (np.array(answer_start),np.array(answer_end))
-    print(batch[1][1].shape)
     return batch
 
 class Base(nn.Module):
@@ -154,7 +167,7 @@ class Base(nn.Module):
         self.size_log = logging.getLogger(size_log_name)
         self.size_log.info('size_log')
         self.log.setLevel(logging.DEBUG)
-        self.size_log.setLevel(logging.DEBUG)
+        self.size_log.setLevel(logging.INFO)
        
     def cpu(self):
         super(Base, self).cpu()
@@ -227,9 +240,9 @@ class Encoder(Base):
         Q    = self.__(  torch.cat([Q, s], dim=1), 'Q')
 
         
-        squashedQ = self.__(  Q.view(batch_size * (question_size + 1), -1), 'squashedQ'    ) 
+        squashedQ    = self.__(  Q.view(batch_size * (question_size + 1), -1), 'squashedQ'    ) 
         transformedQ = self.__(  F.tanh(self.linear(Q))                    , 'transformedQ' )
-        Q = self.__(  Q.view(batch_size, question_size + 1, -1) , 'Q' )
+        Q            = self.__(  Q.view(batch_size, question_size + 1, -1) , 'Q' )
 
         affinity      = self.__(  torch.bmm(C, Q.transpose(1, 2)), 'affinity'  )
         affinity      = F.softmax(affinity)
@@ -243,7 +256,7 @@ class Encoder(Base):
         attn_cq       = self.__(  attn_cq.transpose(1, 2).transpose(0,1), 'attn_cq')
         hidden        = self.__(  init_hidden(batch_size, self.attend), 'hidden')
         final_repr, _ = self.__(  self.attend(attn_cq, hidden), 'final_repr')
-
+        final_repr    = self.__(  final_repr.transpose(0, 1), 'final_repr')
         return final_repr[:, :-1]  #exclude sentinel
         
         
@@ -314,6 +327,7 @@ class PtrDecoder(Base):
             self.cuda()
         
     def forward(self, encoded_repr):
+        self.__(encoded_repr, 'encoded_repr')
         batch_size, seq_len, hidden_size = encoded_repr.size()
         start_repr = encoded_repr[:, 0, :]
         end_repr   = encoded_repr[:, 1, :]
@@ -323,21 +337,27 @@ class PtrDecoder(Base):
             starts, ends = [], []
 
             for ut in encoded_repr.transpose(0, 1):
-                start = self.__( self.find_start(ut, start_repr, end_repr, hidden[0]), 'start')
+                start = self.__( self.find_start(ut, start_repr, end_repr, hidden[0].squeeze(0)), 'start')
+                start = start.squeeze(1)
                 starts.append(start)
 
-            starts = self.__( torch.stack(starts), 'starts')
-            start = starts.data.max(1)[1]
-            start_repr = torch.cat([  encoded_repr[i][ start[i] ] for i in range(seq_len)   ])
-                
+            starts = self.__( torch.stack(starts).transpose(0,1), 'starts')
+            start = self.__( starts.data.max(1)[1], 'start')
+            start_repr = self.__( torch.stack([  encoded_repr[i][start[i]] for i in range(batch_size)   ]),
+                                  'start_repr')
+            
             for ut in encoded_repr.transpose(0, 1):
-                end = self.__( self.find_end(ut, end_repr, end_repr, hidden[0]), 'end')
+                end = self.__( self.find_end(ut, end_repr, end_repr, hidden[0].squeeze(0)), 'end')
+                end = end.squeeze(1)
                 ends.append(end)
 
-            ends = self.__( torch.stack(ends), 'ends')
-            end = ends.data.max(1)[1]
-            end_repr = torch.cat([  encoded_repr[i][end[i]] for i in range(seq_len)   ])
+            ends = self.__( torch.stack(ends).transpose(0,1), 'ends')
+            end = self.__( ends.data.max(1)[1], 'end')
+            end_repr = self.__( torch.stack([  encoded_repr[i][end[i]] for i in range(batch_size)   ]),
+                                'end_repr')
 
+            self.__(start_repr, 'start_repr')
+            self.__(end_repr, 'end_repr')
             input_ = self.__( torch.cat([start_repr, end_repr], -1), 'input_')
             hidden = self.__( self.decode(input_, hidden), 'hidden')
 
@@ -348,6 +368,7 @@ class DCN(Base):
     def __init__(self, Config, name, input_vocab_size):
         super(DCN, self).__init__(Config, name)
         self.encode = Encoder(Config, self.name('encode'), input_vocab_size)
+        #self.encode.size_log.setLevel(logging.DEBUG)
         self.decode = PtrDecoder(Config, self.name('decode'))
 
     def forward(self, context, question):
@@ -369,19 +390,18 @@ def experiment(VOCAB, raw_samples, datapoints=[[], []], eons=1000, epochs=10, ch
         print('**** the model', model)
 
         name = os.path.basename(__file__).replace('.py', '')
-        ids = [Sample._fields.index('squad_id')]
         
         _batchop = partial(batchop, WORD2INDEX=VOCAB)
-        train_feed     = DataFeed(name, datapoints[0], ids = ids, batchop=_batchop, batch_size=256)
-        test_feed      = DataFeed(name, datapoints[1], ids = ids, batchop=_batchop, batch_size=256)
-        predictor_feed = DataFeed(name, datapoints[1], ids = ids, batchop=_batchop, batch_size=128)
+        train_feed     = DataFeed(name, datapoints[0], batchop=_batchop, batch_size=32)
+        test_feed      = DataFeed(name, datapoints[1], batchop=_batchop, batch_size=32)
+        predictor_feed = DataFeed(name, datapoints[1], batchop=_batchop, batch_size=32)
 
         loss_weight=Variable(torch.Tensor([0.1, 1, 1]))
         if Config.cuda: loss_weight = loss_weight.cuda()
         _loss = partial(loss, loss_function=nn.NLLLoss())
         trainer = Trainer(name=name,
                           model=model, 
-                          loss_function=_loss, accuracy_function=accuracy, 
+                          loss_function=_loss, accuracy_function=loss, #accuracy, 
                           checkpoint=checkpoint, epochs=epochs,
                           feeder = Feeder(train_feed, test_feed))
 
@@ -400,6 +420,7 @@ def experiment(VOCAB, raw_samples, datapoints=[[], []], eons=1000, epochs=10, ch
                     output, _results = predictor.predict(ri)
                     results.extend(_results)
                 dump.write(repr(results))
+            log.info('on {}th eon training....'.format(e))
             if not trainer.train():
                 raise Exception
         
@@ -422,7 +443,8 @@ if __name__ == '__main__':
     flush = False
     if flush:
         log.info('flushing...')
-        dataset, vocabulary = load_squad_data('dataset/train-v1.1.json')
+        ids = tuple((Sample._fields.index('squad_id'),))
+        dataset, vocabulary = load_squad_data('dataset/train-v1.1.json', ids)
         pickle.dump([dataset, dict(vocabulary)], open('train.squad', 'wb'))
     else:
         dataset, _vocabulary = pickle.load(open('train.squad', 'rb'))
@@ -434,7 +456,6 @@ if __name__ == '__main__':
     log.info('vocabulary: {}'.format(len(vocabulary)))
     
     VOCAB = Vocab(vocabulary, VOCAB)
-    
     if 'train' in sys.argv:
         labelled_samples = dataset
         pivot = int( Config().split_ratio * len(labelled_samples) )
@@ -442,9 +463,8 @@ if __name__ == '__main__':
         train_set, test_set = labelled_samples[:pivot], labelled_samples[pivot:]
         
         train_set = sorted(train_set, key=lambda x: len(x.context))
-        test_set = sorted(test_set, key=lambda x: len(x.context))
-        
-        experiment(VOCAB, dataset, datapoints=[train_set, test_set])
+        test_set  = sorted(test_set, key=lambda x: len(x.context))
+        exp_image = experiment(VOCAB, dataset, datapoints=[train_set, test_set])
         
     if 'predict' in sys.argv:
         model =  BiLSTMDecoderModel(Config(), len(VOCAB),  len(LABELS))
