@@ -105,7 +105,7 @@ class Trainer(object):
         self.epochs     = epochs
         self.checkpoint = checkpoint
 
-        self.optimizer     = optimizer     if optimizer     else optim.SGD(self.runner.model.parameters(), lr=0.001, momentum=0.1)
+        self.optimizer     = optimizer     if optimizer     else optim.SGD(self.runner.model.parameters(), lr=0.01, momentum=0.1)
 
         # necessary metrics
         self.train_loss = EpochAverager(filename = '{}/{}/{}.{}'.format(directory, name, 'metrics',  'train_loss'))
@@ -123,7 +123,7 @@ class Trainer(object):
 
         self.metrics = [self.train_loss, self.test_loss, self.accuracy, self.precision, self.recall, self.f1score]
         
-        self.best_model = (0, None)
+        self.best_model = (0, self.runner.model.state_dict())
         
 
     def __build_model_group(self, runner, model, *args, **kwargs):
@@ -146,18 +146,19 @@ class Trainer(object):
         for epoch in range(self.epochs):
             log.critical('memory consumed : {}'.format(memory_consumed()))            
 
+
             if self.do_every_checkpoint(epoch) == FLAGS.STOP_TRAINING:
                 log.info('loss trend suggests to stop training')
                 self.save_best_model()
                 return
-            
+
             for j in tqdm(range(self.feeder.train.num_batch)):
                 log.debug('{}th batch'.format(j))
                 self.optimizer.zero_grad()
                 _, i, t = self.feeder.train.next_batch()
                 output = self.runner.run(i)
-                loss = self.loss_function( output, t )
-                self.train_loss.append(loss)
+                loss = self.loss_function( output, t, self.feeder.train, j)
+                self.train_loss.append(loss.data[0])
 
                 loss.backward()
                 self.optimizer.step()
@@ -183,13 +184,13 @@ class Trainer(object):
             _, i, t = self.feeder.train.next_batch()
             output =  self.runner.run(i)
 
-            loss = self.loss_function(output, t)
-            self.test_loss.cache(loss)
-            accuracy = self.accuracy_function(output, t)
-            self.accuracy.cache(accuracy)
+            loss = self.loss_function(output, t, self.feeder.train, j)
+            self.test_loss.cache(loss.data[0])
+            accuracy = self.accuracy_function(output, t, self.feeder.train, j)
+            self.accuracy.cache(accuracy.data[0])
 
             if self.f1score_function:
-                precision, recall, f1score = self.f1score_function(output, t)
+                precision, recall, f1score = self.f1score_function(output, t, self.feeder.train, j)
                 self.precision.append(precision)
                 self.recall.append(recall)
                 self.f1score.append(f1score)
