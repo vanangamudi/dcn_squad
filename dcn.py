@@ -98,9 +98,9 @@ def load_squad_data(data_path, ids, max_para_len=600, max_ans_len=10):
 
 
 # ## Loss and accuracy function
-def loss(output, target, loss_function=nn.NLLLoss(), scale=1, *args, **kwargs):
+def loss(output, target, feed, batch_index, loss_function=nn.NLLLoss(), scale=1, *args, **kwargs):
     starts_target, ends_target = target
-    starts_target, ends_target = LongVar(Config, starts_target), LongVar(Config, ends_target)
+    starts_target, ends_target = Variable(torch.LongTensor(starts_target)), Variable(torch.LongTensor(ends_target))
     
     starts_output, ends_output = output
     if Config().cuda:
@@ -109,17 +109,64 @@ def loss(output, target, loss_function=nn.NLLLoss(), scale=1, *args, **kwargs):
     log.debug('i, o sizes: {} {}'.format(starts_target.size(), ends_target.size()))
     log.debug('i, o sizes: {} {}'.format(starts_output.size(), ends_output.size()))
 
-    loss  = loss_function(starts_output, starts_target)
-    loss += loss_function(ends_output, ends_target)
-    
-    return loss
+    loss_starts = loss_function(starts_output, starts_target)
+    loss_ends   = loss_function(ends_output, ends_target)
 
-def accuracy(output, target, *args, **kwargs):
-    output = output.max(-1)[1]
-    target = Variable(torch.LongTensor(target[0]))
-    if Config().cuda: target = target.cuda()
-    log.debug('i, o sizes: {} {}'.format(output.size(), target.size()))
-    return (output == target).sum().float()/output.size(0)
+    del starts_target, ends_target
+    return loss_starts + loss_ends
+
+def accuracy(output, target, feed, batch_index,*args, **kwargs):
+    starts_target, ends_target = target
+    starts_target, ends_target = Variable(torch.LongTensor(starts_target)), Variable(torch.LongTensor(ends_target))
+    
+    starts_output, ends_output = output
+    if Config().cuda:
+        starts_target, ends_target = starts_target.cuda(), ends_target.cuda()
+        
+    log.debug('i, o sizes: {} {}'.format(starts_target.size(), ends_target.size()))
+    log.debug('i, o sizes: {} {}'.format(starts_output.size(), ends_output.size()))
+
+    loss_starts = (starts_output.max(1)[1] == starts_target).float().sum()/starts_output.size(0)
+    loss_ends   = (ends_output.max(1)[1] == ends_target).float().sum()/ends_output.size(0)
+
+    return (loss_starts + loss_ends) / 2
+
+def f1score(output, target, feed, batch_index, *args, **kwargs):
+    p, r, f1 = 0.0, 0.0, 0.0
+    p, r, f1 = Variable(torch.Tensor([p]), requires_grad=False), Variable(torch.Tensor([r]), requires_grad=False), Variable(torch.Tensor([f1]), requires_grad=False)
+    if Config().cuda:
+        p, r, f1 = p.cuda(), r.cuda(), f1.cuda()
+
+    starts_target, ends_target = target
+    starts_target, ends_target = Variable(torch.LongTensor(starts_target)), Variable(torch.LongTensor(ends_target))
+
+    indices, (context, question), (a_start, a_end) = feed.nth_batch(batch_index)
+    
+    starts_output, ends_output = output
+    if Config().cuda:
+        starts_target, ends_target = starts_target.cuda(), ends_target.cuda()
+        
+    log.debug('i, o sizes: {} {}'.format(starts_target.size(), ends_target.size()))
+    log.debug('i, o sizes: {} {}'.format(starts_output.size(), ends_output.size()))
+
+    batch_size = starts_output.size()[0]
+
+    for so, eo, st, et, c in zip(starts_output.max(1)[1], ends_output.max(1)[1], starts_target, ends_target, context):
+        so, eo, st, et = int(so), int(eo), int(st), int(et)
+        o = c[so:eo]
+        t = c[st:et]
+
+        tp = sum([oi in t for oi in o])
+        fp = sum([oi not in t for oi in o])
+        fn = sum([ti not in o for ti in t])
+
+        if tp > 0:
+            p  += tp/ (tp + fp)
+            r  += tp/ (tp + fn)
+
+    p, r = p/batch_size, r/batch_size
+    return (p), (r), (2*p*r/(p+r))
+
 
 def repr_function(output, feed, batch_index, VOCAB, raw_samples):
     results = []
@@ -134,7 +181,7 @@ def repr_function(output, feed, batch_index, VOCAB, raw_samples):
         results.append([ ' '.join(sample.context),
                          ' '.join(sample.q),
                          ' '.join(sample.context[sample.a_start: sample.a_end]),
-                         ' '.join(sample.context[          p_s: p_e       ])
+                         ' '.join(sample.context[          p_s: p_e + 1      ])
         ])
 
     return results
@@ -149,7 +196,7 @@ def batchop(datapoints, WORD2INDEX, *args, **kwargs):
         context.append([WORD2INDEX[w] for w in d.context])
         question.append([WORD2INDEX[w] for w in d.q])
         answer_start.append(d.a_start)
-        answer_end.append(d.a_end)
+        answer_end.append(d.a_end - 1)
         
     context = pad_seq(context)
     question = pad_seq(question)
@@ -166,7 +213,7 @@ class Base(nn.Module):
         self.log.info('constructing logger: {}'.format(size_log_name))
         self.size_log = logging.getLogger(size_log_name)
         self.size_log.info('size_log')
-        self.log.setLevel(logging.DEBUG)
+        self.log.setLevel(logging.INFO)
         self.size_log.setLevel(logging.INFO)
        
     def cpu(self):
@@ -245,7 +292,7 @@ class Encoder(Base):
         Q            = self.__(  Q.view(batch_size, question_size + 1, -1) , 'Q' )
 
         affinity      = self.__(  torch.bmm(C, Q.transpose(1, 2)), 'affinity'  )
-        affinity      = F.softmax(affinity)
+        affinity      = F.softmax(affinity, dim=-1)
         context_attn  = self.__( affinity.transpose(1, 2), 'context_attn')
         question_attn = self.__( affinity                , 'question_attn')
 
@@ -332,32 +379,35 @@ class PtrDecoder(Base):
         start_repr = encoded_repr[:, 0, :]
         end_repr   = encoded_repr[:, 1, :]
 
-        hidden = self.__(  init_hidden(batch_size, self.decode), 'hidden'  )
+        hidden = self.__(  ( Variable(torch.zeros(batch_size, self.decode.hidden_size)).cuda(),
+                             Variable(torch.zeros(batch_size, self.decode.hidden_size)).cuda(),
+                             ),
+                           'hidden'  )
+        
         for i in range(self.max_iter):
+            self.log.debug('decoder iteration: {}'.format(i))
             starts, ends = [], []
 
             for ut in encoded_repr.transpose(0, 1):
-                start = self.__( self.find_start(ut, start_repr, end_repr, hidden[0].squeeze(0)), 'start')
+                start = self.__( self.find_start(ut, start_repr, end_repr, hidden[0]), 'start')
                 start = start.squeeze(1)
                 starts.append(start)
 
-            starts = self.__( torch.stack(starts).transpose(0,1), 'starts')
+            starts = self.__( F.log_softmax(torch.stack(starts), dim=-1).transpose(0,1), 'starts')
             start = self.__( starts.data.max(1)[1], 'start')
             start_repr = self.__( torch.stack([  encoded_repr[i][start[i]] for i in range(batch_size)   ]),
                                   'start_repr')
             
             for ut in encoded_repr.transpose(0, 1):
-                end = self.__( self.find_end(ut, end_repr, end_repr, hidden[0].squeeze(0)), 'end')
+                end = self.__( self.find_end(ut, end_repr, end_repr, hidden[0]), 'end')
                 end = end.squeeze(1)
                 ends.append(end)
 
-            ends = self.__( torch.stack(ends).transpose(0,1), 'ends')
+            ends = self.__( F.log_softmax(torch.stack(ends), dim=-1).transpose(0,1), 'ends')
             end = self.__( ends.data.max(1)[1], 'end')
             end_repr = self.__( torch.stack([  encoded_repr[i][end[i]] for i in range(batch_size)   ]),
                                 'end_repr')
 
-            self.__(start_repr, 'start_repr')
-            self.__(end_repr, 'end_repr')
             input_ = self.__( torch.cat([start_repr, end_repr], -1), 'input_')
             hidden = self.__( self.decode(input_, hidden), 'hidden')
 
@@ -375,7 +425,7 @@ class DCN(Base):
         return self.decode( self.encode(context, question) )
         
             
-def experiment(VOCAB, raw_samples, datapoints=[[], []], eons=1000, epochs=10, checkpoint=1):
+def experiment(VOCAB, raw_samples, datapoints=[[], []], eons=1000, epochs=10, checkpoint=5):
     try:
         try:
             model =  DCN(Config(), 'model', len(VOCAB))
@@ -392,16 +442,16 @@ def experiment(VOCAB, raw_samples, datapoints=[[], []], eons=1000, epochs=10, ch
         name = os.path.basename(__file__).replace('.py', '')
         
         _batchop = partial(batchop, WORD2INDEX=VOCAB)
-        train_feed     = DataFeed(name, datapoints[0], batchop=_batchop, batch_size=32)
-        test_feed      = DataFeed(name, datapoints[1], batchop=_batchop, batch_size=32)
-        predictor_feed = DataFeed(name, datapoints[1], batchop=_batchop, batch_size=32)
+        train_feed     = DataFeed(name, datapoints[0], batchop=_batchop, batch_size=128)
+        test_feed      = DataFeed(name, datapoints[1], batchop=_batchop, batch_size=128)
+        predictor_feed = DataFeed(name, datapoints[1], batchop=_batchop, batch_size=128)
 
         loss_weight=Variable(torch.Tensor([0.1, 1, 1]))
         if Config.cuda: loss_weight = loss_weight.cuda()
         _loss = partial(loss, loss_function=nn.NLLLoss())
         trainer = Trainer(name=name,
                           model=model, 
-                          loss_function=_loss, accuracy_function=loss, #accuracy, 
+                          loss_function=_loss, accuracy_function=accuracy, f1score_function=f1score,
                           checkpoint=checkpoint, epochs=epochs,
                           feeder = Feeder(train_feed, test_feed))
 
@@ -414,16 +464,19 @@ def experiment(VOCAB, raw_samples, datapoints=[[], []], eons=1000, epochs=10, ch
             dump.close()
             log.info('on {}th eon'.format(e))
 
+            """
             with open('results/experiment_attn.csv', 'a') as dump:
                 results = ListTable()
-                for ri in range(predictor_feed.num_batch):
+                for ri in tqdm(range(predictor_feed.num_batch)):
                     output, _results = predictor.predict(ri)
                     results.extend(_results)
                 dump.write(repr(results))
             log.info('on {}th eon training....'.format(e))
+            """
+
             if not trainer.train():
                 raise Exception
-        
+
     except :
         log.exception('####################')
         trainer.save_best_model()
@@ -457,13 +510,13 @@ if __name__ == '__main__':
     
     VOCAB = Vocab(vocabulary, VOCAB)
     if 'train' in sys.argv:
-        labelled_samples = dataset
+        labelled_samples = dataset #[:100]
         pivot = int( Config().split_ratio * len(labelled_samples) )
         random.shuffle(labelled_samples)
         train_set, test_set = labelled_samples[:pivot], labelled_samples[pivot:]
         
-        train_set = sorted(train_set, key=lambda x: len(x.context))
-        test_set  = sorted(test_set, key=lambda x: len(x.context))
+        train_set = sorted(train_set, key=lambda x: -len(x.context))
+        test_set  = sorted(test_set, key=lambda x: -len(x.context))
         exp_image = experiment(VOCAB, dataset, datapoints=[train_set, test_set])
         
     if 'predict' in sys.argv:
