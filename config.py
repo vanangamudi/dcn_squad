@@ -10,8 +10,8 @@ class Base(metaclass=ConfigMeta):
 class Config(Base):
     split_ratio = 0.90
     input_vocab_size = 30000
-    hidden_size = 300
-    embed_size = 400
+    hidden_size = 100
+    embed_size = 100
     batch_size = 2
     pooling_size = 8
     max_iter = 4
