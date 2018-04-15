@@ -31,7 +31,7 @@ import itertools
 from utilz import logger
 from utilz import PAD, pad_seq, word_tokenize
 from utilz import VOCAB
-from utilz import Sample
+from utilz import SequenceSample as Sample
 from utilz import LongVar, Var, init_hidden
 from vocab import Vocab
 
@@ -86,7 +86,7 @@ def load_squad_data(data_path, ids, max_para_len=600, max_ans_len=10):
                         continue
                         
                     a_start, a_end = indices
-                    fields = (aid, pid, qid, squad_id, context, q, a, a_start, a_end)
+                    fields = (aid, pid, qid, squad_id, context, q, a, list(range(a_start, a_end)))
                     _id = tuple( fields[i-1] for i in ids )
                     samples.append(Sample(_id, *fields))
     except:
@@ -99,63 +99,37 @@ def load_squad_data(data_path, ids, max_para_len=600, max_ans_len=10):
 
 # ## Loss and accuracy function
 def loss(output, target, feed, batch_index, loss_function=nn.NLLLoss(), scale=1, *args, **kwargs):
-    starts_target, ends_target = target
-    starts_target, ends_target = Variable(torch.LongTensor(starts_target)), Variable(torch.LongTensor(ends_target))
-    
-    starts_output, ends_output = output
+    target = Variable(torch.LongTensor(target[0]))
     if Config().cuda:
-        starts_target, ends_target = starts_target.cuda(), ends_target.cuda()
-        
-    log.debug('i, o sizes: {} {}'.format(starts_target.size(), ends_target.size()))
-    log.debug('i, o sizes: {} {}'.format(starts_output.size(), ends_output.size()))
+        target = target.cuda()
 
-    loss_starts = loss_function(starts_output, starts_target)
-    loss_ends   = loss_function(ends_output, ends_target)
-
-    del starts_target, ends_target
-    return loss_starts + loss_ends
+    log.debug('i, o sizes: {} {}'.format(target.size(), output.size()))
+    _loss = 0
+    for index, (o, t) in enumerate(zip(output, target.transpose(0,1))):
+        _loss += loss_function(o, t)
+    
+    return _loss/output.size(1)
 
 def accuracy(output, target, feed, batch_index,*args, **kwargs):
-    starts_target, ends_target = target
-    starts_target, ends_target = Variable(torch.LongTensor(starts_target)), Variable(torch.LongTensor(ends_target))
-    
-    starts_output, ends_output = output
+    target = Variable(torch.LongTensor(target[0]))
     if Config().cuda:
-        starts_target, ends_target = starts_target.cuda(), ends_target.cuda()
+        target = target.cuda()
+    indices, (context, question, answer_lengths), (a_positions, ) = feed.nth_batch(batch_index)
+    log.debug('i, o sizes: {} {}'.format(target.size(), output.size()))
+    _accuracy = 0
+    for index, (o, t) in enumerate(zip(output, target.transpose(0,1))):
+        _accuracy += (o.max(1)[1] ==  t).float().sum()/o.size(0)
         
-    log.debug('i, o sizes: {} {}'.format(starts_target.size(), ends_target.size()))
-    log.debug('i, o sizes: {} {}'.format(starts_output.size(), ends_output.size()))
-
-    loss_starts = (starts_output.max(1)[1] == starts_target).float().sum()/starts_output.size(0)
-    loss_ends   = (ends_output.max(1)[1] == ends_target).float().sum()/ends_output.size(0)
-
-    return (loss_starts + loss_ends) / 2
+    return _accuracy / output.size(0)
 
 def f1score(output, target, feed, batch_index, *args, **kwargs):
     p, r, f1 = 0.0, 0.0, 0.0
-    p, r, f1 = Variable(torch.Tensor([p]), requires_grad=False), Variable(torch.Tensor([r]), requires_grad=False), Variable(torch.Tensor([f1]), requires_grad=False)
-    if Config().cuda:
-        p, r, f1 = p.cuda(), r.cuda(), f1.cuda()
 
-    starts_target, ends_target = target
-    starts_target, ends_target = Variable(torch.LongTensor(starts_target)), Variable(torch.LongTensor(ends_target))
-
-    indices, (context, question), (a_start, a_end) = feed.nth_batch(batch_index)
+    batch_size = output.size(1)
+    target = target[0]
+    output = output.transpose(0,1).transpose(1, 2).max(2)[1].data.tolist()
     
-    starts_output, ends_output = output
-    if Config().cuda:
-        starts_target, ends_target = starts_target.cuda(), ends_target.cuda()
-        
-    log.debug('i, o sizes: {} {}'.format(starts_target.size(), ends_target.size()))
-    log.debug('i, o sizes: {} {}'.format(starts_output.size(), ends_output.size()))
-
-    batch_size = starts_output.size()[0]
-
-    for so, eo, st, et, c in zip(starts_output.max(1)[1], ends_output.max(1)[1], starts_target, ends_target, context):
-        so, eo, st, et = int(so), int(eo), int(st), int(et)
-        o = c[so:eo]
-        t = c[st:et]
-
+    for index, (o, t) in enumerate(zip(output, target)):
         tp = sum([oi in t for oi in o])
         fp = sum([oi not in t for oi in o])
         fn = sum([ti not in o for ti in t])
@@ -165,23 +139,29 @@ def f1score(output, target, feed, batch_index, *args, **kwargs):
             r  += tp/ (tp + fn)
 
     p, r = p/batch_size, r/batch_size
-    return (p), (r), (2*p*r/(p+r))
+    if p + r > 0:
+        f1 = 2*p*r/(p+r)
+        
+    return p, r, f1
 
 
 def repr_function(output, feed, batch_index, VOCAB, raw_samples):
     results = []
-    starts, ends = output
-    starts = starts.data.max(dim=-1)[1].cpu().numpy()
-    ends = ends.data.max(dim=-1)[1].cpu().numpy()
-    
+    output = output.transpose(0, 1).transpose(1, 2).max(2)[1]
     indices, (context, question), (a_start, a_end) = feed.nth_batch(batch_index)
 
-    for idx, p_s, p_e, a_s, a_e in zip(indices, starts, ends, a_start, a_end):
+    for idx, op in zip(indices, output):
         sample = feed.data_dict[idx]
+        _op = []
+        for i in op:
+            if i < len(sample.context):
+                _op.append(i)
+            else: break
+                
         results.append([ ' '.join(sample.context),
                          ' '.join(sample.q),
-                         ' '.join(sample.context[sample.a_start: sample.a_end]),
-                         ' '.join(sample.context[          p_s: p_e + 1      ])
+                         ' '.join(sample.context[i] for i in sample.a_positions),
+                         ' '.join(sample.context[i] for i in _op),
         ])
 
     return results
@@ -190,18 +170,21 @@ def batchop(datapoints, WORD2INDEX, *args, **kwargs):
     indices = [d.id for d in datapoints]
     context = []
     question = []
-    answer_start = []
-    answer_end = []
+    answer_positions = []
+    answer_lengths = []
     for d in datapoints:
-        context.append([WORD2INDEX[w] for w in d.context])
+        context.append([WORD2INDEX[w] for w in d.context] + [WORD2INDEX['EOS']])
         question.append([WORD2INDEX[w] for w in d.q])
-        answer_start.append(d.a_start)
-        answer_end.append(d.a_end - 1)
+        
+        answer_length = len(d.a_positions) + 1
+        answer_positions.append([i for i in d.a_positions] + [len(d.context)])
+        answer_lengths.append(answer_length)
         
     context = pad_seq(context)
     question = pad_seq(question)
+    answer_positions = pad_seq(answer_positions)
 
-    batch = indices, (np.array(context), np.array(question)), (np.array(answer_start),np.array(answer_end))
+    batch = indices, (np.array(context), np.array(question), np.array(answer_lengths)), (np.array(answer_positions),)
     return batch
 
 class Base(nn.Module):
@@ -331,19 +314,18 @@ class HMN(Base):
         self.hidden_size = Config.hidden_size
         self.pooling_size = Config.pooling_size
         
-        self.linear = nn.Linear(5 * self.hidden_size, self.hidden_size)
+        self.linear = nn.Linear(3 * self.hidden_size, self.hidden_size)
         
         self.W_1 = Maxout(Config, self.name('W_1'), 3 * self.hidden_size, self.hidden_size, self.pooling_size)
         self.W_2 = Maxout(Config, self.name('W_2'),    self.hidden_size, self.hidden_size, self.pooling_size)
         self.W_3 = Maxout(Config, self.name('W_3'), 2 * self.hidden_size, 1,               self.pooling_size)
         
-    def forward(self, ut, start_repr, end_repr, hidden):
+    def forward(self, ut, ptr_repr, hidden):
 
-        self.__(start_repr, 'start_repr')
-        self.__(end_repr, 'end_repr')
+        self.__(ptr_repr, 'start_repr')
         self.__(hidden, 'hidden')
         
-        r = self.__(  torch.cat( [start_repr, end_repr, hidden], dim=1 ), 'r'  )
+        r = self.__(  torch.cat( [ptr_repr, hidden], dim=1 ), 'r'  )
         r = self.__(  F.tanh(self.linear(r))                        , 'r'  )
 
         ut_r = self.__(  torch.cat([ut, r], dim=1), 'ut_r')
@@ -363,55 +345,44 @@ class PtrDecoder(Base):
         self.pooling_size = Config.pooling_size
         self.max_iter     = Config.max_iter
 
-        self.decode = nn.LSTMCell(4 * self.hidden_size, self.hidden_size)
+        self.decode = nn.LSTMCell(2 * self.hidden_size, self.hidden_size)
         
-        self.find_start = HMN(Config, self.name('find_start'))
-        self.find_end   = HMN(Config, self.name('find_end'))
-
+        self.find_ptr = HMN(Config, self.name('find_ptr'))
         self.dropout = nn.Dropout(Config.dropout)
 
         if Config.cuda:
             self.cuda()
         
-    def forward(self, encoded_repr):
+    def forward(self, encoded_repr, answer_lengths):
+        answer_lengths = torch.LongTensor(answer_lengths)
         self.__(encoded_repr, 'encoded_repr')
         batch_size, seq_len, hidden_size = encoded_repr.size()
-        start_repr = encoded_repr[:, 0, :]
-        end_repr   = encoded_repr[:, 1, :]
+        ptr_repr = encoded_repr[:, 0, :]
 
         hidden = self.__(  ( Variable(torch.zeros(batch_size, self.decode.hidden_size)).cuda(),
                              Variable(torch.zeros(batch_size, self.decode.hidden_size)).cuda(),
                              ),
                            'hidden'  )
-        
-        for i in range(self.max_iter):
+
+        output = []
+        for i in range(answer_lengths.max()):
             self.log.debug('decoder iteration: {}'.format(i))
-            starts, ends = [], []
+            ptrs = []
 
             for ut in encoded_repr.transpose(0, 1):
-                start = self.__( self.find_start(ut, start_repr, end_repr, hidden[0]), 'start')
-                start = start.squeeze(1)
-                starts.append(start)
+                ptr = self.__( self.find_ptr(ut, ptr_repr, hidden[0]), 'ptr')
+                ptr = ptr.squeeze(1)
+                ptrs.append(ptr)
 
-            starts = self.__( F.log_softmax(torch.stack(starts), dim=-1).transpose(0,1), 'starts')
-            start = self.__( starts.data.max(1)[1], 'start')
-            start_repr = self.__( torch.stack([  encoded_repr[i][start[i]] for i in range(batch_size)   ]),
-                                  'start_repr')
+            ptrs = self.__( F.log_softmax(torch.stack(ptrs), dim=-1).transpose(0,1), 'ptrs')
+            ptr = self.__( ptrs.data.max(1)[1], 'ptr')
+            output.append(ptrs)
+            ptr_repr = self.__( torch.stack([  encoded_repr[i][ptr[i]] for i in range(batch_size)   ]),
+                                  'ptr_repr')
             
-            for ut in encoded_repr.transpose(0, 1):
-                end = self.__( self.find_end(ut, end_repr, end_repr, hidden[0]), 'end')
-                end = end.squeeze(1)
-                ends.append(end)
+            hidden = self.__( self.decode(ptr_repr, hidden), 'hidden')
 
-            ends = self.__( F.log_softmax(torch.stack(ends), dim=-1).transpose(0,1), 'ends')
-            end = self.__( ends.data.max(1)[1], 'end')
-            end_repr = self.__( torch.stack([  encoded_repr[i][end[i]] for i in range(batch_size)   ]),
-                                'end_repr')
-
-            input_ = self.__( torch.cat([start_repr, end_repr], -1), 'input_')
-            hidden = self.__( self.decode(input_, hidden), 'hidden')
-
-        return starts, ends
+        return torch.stack(output)
 
 
 class DCN(Base):
@@ -421,8 +392,9 @@ class DCN(Base):
         #self.encode.size_log.setLevel(logging.DEBUG)
         self.decode = PtrDecoder(Config, self.name('decode'))
 
-    def forward(self, context, question):
-        return self.decode( self.encode(context, question) )
+    def forward(self, context, question, answer_lengths):
+        return self.decode( self.encode(context, question),
+                            answer_lengths )
         
             
 def experiment(VOCAB, raw_samples, datapoints=[[], []], eons=1000, epochs=10, checkpoint=5):
@@ -442,9 +414,9 @@ def experiment(VOCAB, raw_samples, datapoints=[[], []], eons=1000, epochs=10, ch
         name = os.path.basename(__file__).replace('.py', '')
         
         _batchop = partial(batchop, WORD2INDEX=VOCAB)
-        train_feed     = DataFeed(name, datapoints[0], batchop=_batchop, batch_size=128)
-        test_feed      = DataFeed(name, datapoints[1], batchop=_batchop, batch_size=128)
-        predictor_feed = DataFeed(name, datapoints[1], batchop=_batchop, batch_size=128)
+        train_feed     = DataFeed(name, datapoints[0], batchop=_batchop, batch_size=16)
+        test_feed      = DataFeed(name, datapoints[1], batchop=_batchop, batch_size=16)
+        predictor_feed = DataFeed(name, datapoints[1], batchop=_batchop, batch_size=16)
 
         loss_weight=Variable(torch.Tensor([0.1, 1, 1]))
         if Config.cuda: loss_weight = loss_weight.cuda()
@@ -505,12 +477,12 @@ if __name__ == '__main__':
         vocabulary.update(_vocabulary)
         
     log.info('dataset size: {}'.format(len(dataset)))
-    #log.info('dataset[:10]: {}'.format(pformat(dataset[:10])))
+    log.info('dataset[:10]: {}'.format(pformat(dataset[0])))
     log.info('vocabulary: {}'.format(len(vocabulary)))
     
     VOCAB = Vocab(vocabulary, VOCAB)
     if 'train' in sys.argv:
-        labelled_samples = dataset #[:100]
+        labelled_samples = [d for d in dataset[:10000] if len(d.a_positions) < 2] #[:100]
         pivot = int( Config().split_ratio * len(labelled_samples) )
         random.shuffle(labelled_samples)
         train_set, test_set = labelled_samples[:pivot], labelled_samples[pivot:]
