@@ -149,7 +149,6 @@ class Trainer(object):
 
             if self.do_every_checkpoint(epoch) == FLAGS.STOP_TRAINING:
                 log.info('loss trend suggests to stop training')
-                self.save_best_model()
                 return
 
             for j in tqdm(range(self.feeder.train.num_batch)):
@@ -208,6 +207,7 @@ class Trainer(object):
 
         if self.best_model[0] < self.accuracy.avg:
             self.best_model = (self.accuracy.avg, self.runner.model.state_dict())
+            self.save_best_model()
 
     def loss_trend(self):
         if len(self.test_loss) > 4:
