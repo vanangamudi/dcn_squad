@@ -8,8 +8,8 @@ logging.basicConfig(format="%(levelname)-8s:%(filename)s.%(funcName)20s >>   %(m
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
 
-from debug import memory_consumed
-from utilz import ListTable
+from ..debug import memory_consumed
+from ..utilz import ListTable
 from tqdm import tqdm as _tqdm
 
 import torch

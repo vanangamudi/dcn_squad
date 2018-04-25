@@ -4,8 +4,8 @@ import time
 import random
 from pprint import pprint, pformat
 
-from logger import CMDFilter
 
+from anikattu.logger import CMDFilter
 import logging
 from pprint import pprint, pformat
 logging.basicConfig(format="%(levelname)-8s:%(filename)s.%(name)s.%(funcName)s >>   %(message)s")
@@ -19,24 +19,26 @@ from torch.nn import functional as F
 from torch.autograd import Variable
 import torch
 
-from trainer import Trainer, Feeder, Predictor
-from datafeed import DataFeed, MultiplexedDataFeed
-from utilz import tqdm, ListTable
+from anikattu.trainer import Trainer, Feeder, Predictor
+from anikattu.datafeed import DataFeed, MultiplexedDataFeed
+from anikattu.utilz import tqdm, ListTable
 
 from functools import partial
 
 from collections import namedtuple, defaultdict
 import itertools
 
-from utilz import logger
-from utilz import PAD, pad_seq, word_tokenize
-from utilz import VOCAB
 from utilz import SequenceSample as Sample
-from utilz import LongVar, Var, init_hidden
-from vocab import Vocab
+from utilz import PAD,  word_tokenize
+from utilz import VOCAB
+from anikattu.utilz import pad_seq
 
+from anikattu.utilz import logger
+from anikattu.vocab import Vocab
+from anikattu.tokenstring import TokenString
+from anikattu.utilz import LongVar, Var, init_hidden
 import numpy as np
-from tokenstring import TokenString
+
 
 SELF_NAME = os.path.basename(__file__).replace('.py', '')
 
