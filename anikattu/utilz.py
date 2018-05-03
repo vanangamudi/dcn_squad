@@ -123,15 +123,10 @@ torch utils
 """
 
 
-def LongVar(Config, array):
-    ret =  Variable(torch.LongTensor(array))
-    if Config.cuda:
-        ret = ret.cuda()
+def LongVar(array):
+    return Var(array).long()
 
-    return ret
-
-
-def Var(Config, array):
+def Var(array):
     ret =  Variable(torch.Tensor(array))
     if Config.cuda:
         ret = ret.cuda()
@@ -145,14 +140,21 @@ def init_hidden(batch_size, cell):
         layers = cell.num_layers
         if cell.bidirectional:
             layers = layers * 2
-        
-    hidden  = Variable(torch.zeros(layers, batch_size, cell.hidden_size))
-    context = Variable(torch.zeros(layers, batch_size, cell.hidden_size))
+
+    if isinstance(cell, nn.LSTMCell):
+        hidden  = Variable(torch.zeros(layers, batch_size, cell.hidden_size))
+        context = Variable(torch.zeros(layers, batch_size, cell.hidden_size))
     
-    if Config.cuda:
-        hidden  = hidden.cuda()
-        context = context.cuda()
-    return hidden, context
+        if Config.cuda:
+            hidden  = hidden.cuda()
+            context = context.cuda()
+        return hidden, context
+
+    if isinstance(cell, nn.GRUCell):
+        hidden  = Variable(torch.zeros(layers, batch_size, cell.hidden_size))
+        if Config.cuda:
+            hidden  = hidden.cuda()
+        return hidden
 
 
 class Averager(list):
