@@ -38,8 +38,6 @@ class Trainer(Trainer):
         self.encoder_model, self.decoder_model = model
         self.__build_feeder(feeder, *args, **kwargs)
 
-        assert initial_decoder_input != None, 'initial_decoder_input is necesary'
-        self.initial_decoder_input = initial_decoder_input
         self.teacher_forcing_ratio = teacher_forcing_ratio
         self.epochs     = epochs
         self.checkpoint = checkpoint
@@ -52,19 +50,18 @@ class Trainer(Trainer):
             self.encoder_optimizer, self.decoder_optimizer = optimizer
         else:
             self.encoder_optimizer, self.decoder_optimizer = (
-                optim.SGD(self.encoder_model.parameters(),lr=0.1, momentum=0.1),
-                optim.SGD(self.decoder_model.parameters(),lr=0.1, momentum=0.1)
+                optim.SGD(self.encoder_model.parameters(),lr=0.005, momentum=0.1),
+                optim.SGD(self.decoder_model.parameters(),lr=0.005, momentum=0.1)
             )
 
         self.__build_stats(directory)
-        self.best_model = (0, (self.encoder_model.state_dict(), self.
-                               decoder_model.state_dict())
+        self.best_model = (0, (self.encoder_model.cpu().state_dict(), self.decoder_model.cpu().state_dict())
         )
 
     def save_best_model(self):
         log.info('saving the last best model...')
-        torch.save(self.best_model[1][0], '{}.{}'.format(self.name, 'encoder', 'pth'))
-        torch.save(self.best_model[1][1], '{}.{}'.format(self.name, 'decoder', 'pth'))
+        torch.save(self.best_model[1][0], '{}.{}.{}'.format(self.name, 'encoder', 'pth'))
+        torch.save(self.best_model[1][1], '{}.{}.{}'.format(self.name, 'decoder', 'pth'))
 
     def train(self):
         self.encoder_model.train()
@@ -81,20 +78,23 @@ class Trainer(Trainer):
                 self.encoder_optimizer.zero_grad()
                 self.decoder_optimizer.zero_grad()
 
-                idxs, i, t = self.feeder.train.next_batch()
-                encoder_output = self.encoder_model(*i)
+                input_ = self.feeder.train.next_batch()
+                idxs, inputs, targets = input_
+                encoder_output = self.encoder_model(input_)
                 loss = 0
-                decoder_input = LongVar(Config, [self.initial_decoder_input]).expand(len(idxs))
-                hidden = encoder_output[-1]
-                for ti in range(t.size(1)):
-                    decoder_output, hidden = self.decoder_model(encoder_output, decoder_input, hidden)
-                    loss += self.loss_function(decoder_output, t[:,ti], self.feeder.train, j)
-
+                decoder_input = self.decoder_model.initial_input(len(idxs)), None
+                t = targets[0].transpose(0,1)
+                for ti in range(t.size(0)):
+                    decoder_output, hidden = self.decoder_model(encoder_output, decoder_input, input_)
+                    loss += self.loss_function(ti, decoder_output, input_)
+                    
                     if random.random() < self.teacher_forcing_ratio:
                         decoder_input = decoder_output.max(1)[1]
                     else:
-                        decoder_input =  t[:,ti]
-                        
+                        decoder_input =  t[ti]
+
+                    decoder_input = decoder_input, hidden
+                    
                 self.train_loss.append(loss.data[0])
 
                 loss.backward()
@@ -117,23 +117,24 @@ class Trainer(Trainer):
         self.encoder_model.eval()
         self.decoder_model.eval()
         for j in tqdm(range(self.feeder.test.num_batch)):
-            idxs, i, t = self.feeder.test.next_batch()
-            encoder_output = self.encoder_model(*i)
-            loss = 0
+            input_ = self.feeder.test.next_batch()
+            idxs, inputs, targets = input_
+            encoder_output = self.encoder_model(input_)
             accuracy = 0
-            decoder_input = LongVar(Config, [self.initial_decoder_input]).expand(len(idxs))
-            hidden = encoder_output[-1]
-            for ti in range(t.size(1)):
-                decoder_output, hidden = self.decoder_model(encoder_output, decoder_input, hidden)
-                loss += self.loss_function(decoder_output, t[:,ti], self.feeder.train, j)
-                accuracy += self.accuracy_function(decoder_output, t[:, ti], self.feeder.test, j)
-                decoder_input = decoder_output.max(1)[1]
+            loss = 0
+            decoder_input = self.decoder_model.initial_input(len(idxs)), None
+            t = targets[0].transpose(0,1)
+            for ti in range(t.size(0)):
+                decoder_output, hidden = self.decoder_model(encoder_output, decoder_input, input_)
+                loss += self.loss_function(ti, decoder_output, input_)
+                accuracy += self.accuracy_function(ti, decoder_output, input_)
+                decoder_input = decoder_output.max(1)[1], hidden
                 
             self.test_loss.cache(loss.data[0])
-            self.accuracy.cache(accuracy.data[0])
+            self.accuracy.cache(accuracy.data[0]/ti)
 
             if self.f1score_function:
-                precision, recall, f1score = self.f1score_function(output, t, self.feeder.test, j)
+                precision, recall, f1score = self.f1score_function(output, input_)
                 self.precision.append(precision)
                 self.recall.append(recall)
                 self.f1score.append(f1score)
@@ -152,20 +153,18 @@ class Trainer(Trainer):
             return self.loss_trend()
 
         if self.best_model[0] < self.accuracy.avg:
-            self.best_model = (self.accuracy.avg, self.model.state_dict())
+            self.best_model = (self.accuracy.avg, (self.encoder_model.state_dict(), self.decoder_model.state_dict()))
             self.save_best_model()
     
 class Predictor(object):
     def __init__(self, model=(None,None),
                  feed = None,
                  repr_function = None,
-                 initial_decoder_input=None,
                  *args, **kwargs):
 
         self.encoder_model, self.decoder_model = model
         self.__build_feed(feed, *args, **kwargs)
         self.repr_function = repr_function
-        self.initial_decoder_input = initial_decoder_input
                     
     def __build_feed(self, feed, *args, **kwargs):
         assert feed is not None, 'feed is None, fatal error'
@@ -175,16 +174,19 @@ class Predictor(object):
         log.debug('batch_index: {}'.format(batch_index))
         idxs, i, *__ = self.feed.nth_batch(batch_index)
         self.encoder_model.eval()
-        self.decoder_model.eval()        
-        encoder_output = self.encoder_model(*i)
+        self.decoder_model.eval()
         decoder_outputs = []
-        decoder_input = LongVar(Config, [self.initial_decoder_input]).expand(len(idxs))
-        hidden = encoder_output[-1]
-        for ti in range(max_decoder_len):
-            decoder_output, hidden = self.decoder_model(encoder_output, decoder_input, hidden)
+        input_ = self.feed.next_batch()
+        idxs, inputs, targets = input_
+        encoder_output = self.encoder_model(input_)
+        decoder_input = self.decoder_model.initial_input(len(idxs)), None
+        t = targets[0].transpose(0,1)
+        for ti in range(t.size(0)):
+            decoder_output, hidden = self.decoder_model(encoder_output, decoder_input, input_)
             decoder_input = decoder_output.max(1)[1]
             decoder_outputs.append(decoder_input)
-
+            decoder_input = decoder_input, hidden
+            
         results = ListTable()
         decoder_outputs = torch.stack(decoder_outputs)
         results.extend( self.repr_function(decoder_outputs, self.feed, batch_index) )
