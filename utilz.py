@@ -20,7 +20,7 @@ word_tokenize = word_punct_tokenizer.tokenize
 
 from anikattu.tokenizer import word_tokenize
 
-VOCAB =  ['PAD', 'UNK', 'EOS']
+VOCAB =  ['PAD', 'UNK', 'GO', 'EOS']
 PAD = VOCAB.index('PAD')
 
 """

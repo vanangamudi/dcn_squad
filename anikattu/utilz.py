@@ -153,3 +153,40 @@ def init_hidden(batch_size, cell):
         hidden  = hidden.cuda()
         context = context.cuda()
     return hidden, context
+
+
+class Averager(list):
+    def __init__(self, filename=None, *args, **kwargs):
+        super(Averager, self).__init__(*args, **kwargs)
+        if filename:
+            open(filename, 'w').close()
+
+        self.filename = filename
+        
+    @property
+    def avg(self):
+        if len(self):
+            return sum(self)/len(self)
+        else:
+            return 0
+
+
+    def __str__(self):
+        if len(self) > 0:
+            return 'min/max/avg/latest: {:0.5f}/{:0.5f}/{:0.5f}/{:0.5f}'.format(min(self), max(self), self.avg, self[-1])
+        
+        return '<empty>'
+
+    def append(self, a):
+        try:
+            super(Averager, self).append(a.data[0])
+        except:
+            super(Averager, self).append(a)
+            
+    def empty(self):
+        del self[:]
+
+    def write_to_file(self):
+        if self.filename:
+            with open(self.filename, 'a') as f:
+                f.write(self.__str__() + '\n')
