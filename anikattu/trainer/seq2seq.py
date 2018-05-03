@@ -55,7 +55,7 @@ class Trainer(Trainer):
             )
 
         self.__build_stats(directory)
-        self.best_model = (0, (self.encoder_model.cpu().state_dict(), self.decoder_model.cpu().state_dict())
+        self.best_model = (0, (self.encoder_model.state_dict(), self.decoder_model.state_dict())
         )
 
     def save_best_model(self):
