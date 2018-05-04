@@ -219,10 +219,14 @@ class Encoder(Base):
         self.embed_size = Config.embed_size
         self.hidden_size = Config.hidden_size
         self.embed = nn.Embedding(input_vocab_size, self.embed_size)
-
-        self.encode = nn.GRU(self.embed.embedding_dim, self.hidden_size, bidirectional=True)
-        self.dropout = nn.Dropout(0.1)
         
+        self.encode_context = nn.GRU(self.embed.embedding_dim, self.hidden_size, bidirectional=True)
+        self.encode_question = nn.GRU(self.embed.embedding_dim, self.hidden_size, bidirectional=True)
+        self.dropout = nn.Dropout(0.1)
+
+        if Config.cuda:
+            self.cuda()
+            
     def forward(self, input_):
         idxs, inputs, targets = input_
         context, question, _ = inputs
@@ -236,11 +240,11 @@ class Encoder(Base):
         question = self.__( self.embed(question), 'question_emb')
 
         context  = context.transpose(1,0)
-        C, _  = self.__(  self.encode(context, init_hidden(batch_size, self.encode)), 'C')
+        C, _  = self.__(  self.encode_context(context, init_hidden(batch_size, self.encode_context)), 'C')
         
         question  = question.transpose(1,0)
-        Q, _ = self.__(  self.encode(question, init_hidden(batch_size, self.encode)), 'Q')
-        return C, Q
+        Q, _ = self.__(  self.encode_question(question, init_hidden(batch_size, self.encode_question)), 'Q')
+        return F.tanh(C), F.tanh(Q)
                 
 
 
@@ -260,8 +264,7 @@ class PtrDecoder(Base):
         self.dropout = nn.Dropout(Config.dropout)
 
         self.project_query = nn.Linear(4 * self.hidden_size, 2 * self.hidden_size)
-        self.attn = nn.Parameter(torch.ones(2 * self.hidden_size, 2 * self.hidden_size))
-        self.linear = nn.Linear(2 * self.hidden_size, self.output_vocab_size)
+        self.attn = nn.Parameter(torch.zeros(2 * self.hidden_size, 2 * self.hidden_size))
 
         
     def initial_input(self, batch_size):
@@ -279,11 +282,12 @@ class PtrDecoder(Base):
             hidden = context_states[-1]
             
         hidden = self.__( self.decode(decoder_input, hidden), 'decoder_output')
-        
+        hidden = F.tanh(hidden)
         #combine question and current hidden state and project
         query = self.__( torch.cat([question_states[-1], hidden], dim=-1), 'query')
         query = self.__( self.project_query(query), 'projected query')
-
+        query = F.tanh(query)
+        
         sentinel = self.__( Var(torch.zeros(batch_size, context_states.size(2))), 'sentinel')
         pointer_predistribution = self.__(
             torch.cat([
@@ -295,7 +299,7 @@ class PtrDecoder(Base):
         attn = self.__( torch.bmm(query.unsqueeze(1), attn.expand(batch_size, *self.attn.size())), 'attn')
         attn = self.__( torch.bmm(attn, pointer_predistribution.transpose(1, 2)), 'attn').squeeze(1)
 
-        ret = self.__( F.log_softmax(attn), 'ret')
+        ret = self.__( F.log_softmax(attn, dim=-1), 'ret')
         return ret, hidden
     
 class Decoder(Base):
@@ -360,8 +364,6 @@ def experiment(VOCAB, raw_samples, datapoints=[[], []], eons=1000, epochs=10, ch
         test_feed      = DataFeed(name, datapoints[1], batchop=_batchop, batch_size=16)
         predictor_feed = DataFeed(name, datapoints[1], batchop=_batchop, batch_size=16)
 
-        loss_weight=Variable(torch.Tensor([0.1, 1, 1]))
-        if Config.cuda: loss_weight = loss_weight.cuda()
         _loss = partial(loss, loss_function=nn.NLLLoss())
         trainer = Trainer(name=name,
                           model=(encoder, decoder),
@@ -421,13 +423,13 @@ if __name__ == '__main__':
     
     VOCAB = Vocab(vocabulary, VOCAB)
     if 'train' in sys.argv:
-        labelled_samples = [d for d in dataset if len(d.a_positions) < 200] #[:100]
+        labelled_samples = [d for d in dataset if len(d.a_positions) < 2000] #[:100]
         pivot = int( Config().split_ratio * len(labelled_samples) )
         random.shuffle(labelled_samples)
         train_set, test_set = labelled_samples[:pivot], labelled_samples[pivot:]
         
-        train_set = sorted(train_set, key=lambda x: -len(x.context))
-        test_set  = sorted(test_set, key=lambda x: -len(x.context))
+        train_set = sorted(train_set, key=lambda x: len(x.context))
+        test_set  = sorted(test_set, key=lambda x: len(x.context))
         exp_image = experiment(VOCAB, dataset, datapoints=[train_set, test_set])
         
     if 'predict' in sys.argv:
