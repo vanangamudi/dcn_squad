@@ -16,7 +16,7 @@ class Vocab:
         if sort_key:
             index2word = sorted(index2word, key=sort_key)
 
-        self.index2word = special_tokens + index2word        
+        self.index2word = special_tokens + index2word
         self.word2index = {w:i for i, w in enumerate(self.index2word)}
 
         log.info('number of word in index2word and word2index: {} and {}'
@@ -26,8 +26,20 @@ class Vocab:
         if type(key) == int:
             return self.index2word[key]
         elif type(key) == str:
-            return self.word2index[key]
+            if key in self.word2index:
+                return self.word2index[key]
+            else:
+                return self.word2index['UNK']
 
 
     def __len__(self):
         return len(self.index2word)
+
+    def extend(self, words):        
+        self.word2index.update(
+            {
+                w  :   i + len(self.index2word)
+                for i, w in enumerate(words)
+            })
+        
+        self.index2word += words
