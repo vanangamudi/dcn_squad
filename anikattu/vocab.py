@@ -7,12 +7,14 @@ log.setLevel(logging.INFO)
 
 class Vocab:
 
-    def __init__(self, vocab, special_tokens, sort_key=None):
+    def __init__(self, vocab, special_tokens, max_size=None, sort_key=None):
 
         log.info('Constructiong vocabuluary object...')
         self.vocab = vocab
 
-        index2word = list(vocab.keys())
+        vocab = sorted(vocab.items(), key=lambda x: x[1])
+        if max_size: vocab = vocab[:max_size]
+        index2word = vocab
         if sort_key:
             index2word = sorted(index2word, key=sort_key)
 
