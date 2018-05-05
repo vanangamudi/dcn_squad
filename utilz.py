@@ -29,3 +29,4 @@ PAD = VOCAB.index('PAD')
 """
 BoundarySample = namedtuple('BoundarySample', ['id', 'aid', 'pid', 'qid', 'squad_id', 'context', 'q', 'a', 'a_start', 'a_end'])
 SequenceSample = namedtuple('SequenceSample', ['id', 'aid', 'pid', 'qid', 'squad_id', 'context', 'q', 'a', 'a_positions'])
+PtrGenSample   =  namedtuple('PtrGenSample', ['id', 'aid', 'pid', 'qid', 'squad_id', 'context', 'q', 'a'])
