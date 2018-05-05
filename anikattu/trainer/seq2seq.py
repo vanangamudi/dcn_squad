@@ -50,8 +50,8 @@ class Trainer(Trainer):
             self.encoder_optimizer, self.decoder_optimizer = optimizer
         else:
             self.encoder_optimizer, self.decoder_optimizer = (
-                optim.SGD(self.encoder_model.parameters(),lr=0.005, momentum=0.1),
-                optim.SGD(self.decoder_model.parameters(),lr=0.005, momentum=0.1)
+                optim.SGD(self.encoder_model.parameters(),lr=1e-3, momentum=0.01),
+                optim.SGD(self.decoder_model.parameters(),lr=1e-3, momentum=0.01)
             )
 
         self.__build_stats(directory)
@@ -85,15 +85,9 @@ class Trainer(Trainer):
                 decoder_input = self.decoder_model.initial_input(len(idxs)), None
                 t = targets[0].transpose(0,1)
                 for ti in range(t.size(0)):
-                    decoder_output, hidden = self.decoder_model(encoder_output, decoder_input, input_)
-                    loss += self.loss_function(ti, decoder_output, input_)
-                    
-                    if random.random() < self.teacher_forcing_ratio:
-                        decoder_input = decoder_output.max(1)[1]
-                    else:
-                        decoder_input =  t[ti]
-
-                    decoder_input = decoder_input, hidden
+                    decoder_output = self.decoder_model(input_, encoder_output, decoder_input)
+                    loss_, decoder_input = self.loss_function(ti, decoder_output, input_)
+                    loss += loss_
                     
                 self.train_loss.append(loss.data[0])
 
