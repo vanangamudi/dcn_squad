@@ -21,15 +21,18 @@ from .trainer import Trainer, Predictor, Feeder, FLAGS
 from ..utilz import Averager, LongVar
 
 class Trainer(Trainer):
-    def __init__(self, name, model=(None, None),
-                 feeder = None,
+    def __init__(self, name, model,feeder,
                  optimizer=(None, None), 
+
                  loss_function = None,
-                 accuracy_function=None,
-                 f1score_function=None,
+                 accuracy_function = None,
+                 f1score_function = None,
+                 
                  initial_decoder_input = None,
                  teacher_forcing_ratio=0.5,
+
                  epochs=10000, checkpoint=1,
+
                  directory='results',
                  *args, **kwargs):
         
@@ -50,8 +53,8 @@ class Trainer(Trainer):
             self.encoder_optimizer, self.decoder_optimizer = optimizer
         else:
             self.encoder_optimizer, self.decoder_optimizer = (
-                optim.SGD(self.encoder_model.parameters(),lr=1e-3, momentum=0.01),
-                optim.SGD(self.decoder_model.parameters(),lr=1e-3, momentum=0.01)
+                optim.SGD(self.encoder_model.parameters(),lr=1e-4, momentum=0.01),
+                optim.SGD(self.decoder_model.parameters(),lr=1e-4, momentum=0.01)
             )
 
         self.__build_stats(directory)
@@ -156,15 +159,13 @@ class Trainer(Trainer):
 
             
 class Predictor(object):
-    def __init__(self, model=(None,None),
-                 feed = None,
-                 repr_function = None,
-                 *args, **kwargs):
+    def __init__(self, model, feed, repr_function, process_output, *args, **kwargs):
 
         self.encoder_model, self.decoder_model = model
         self.__build_feed(feed, *args, **kwargs)
         self.repr_function = repr_function
-                    
+        self.process_output = process_output
+        
     def __build_feed(self, feed, *args, **kwargs):
         assert feed is not None, 'feed is None, fatal error'
         self.feed = feed
@@ -179,12 +180,15 @@ class Predictor(object):
         idxs, inputs, targets = input_
         encoder_output = self.encoder_model(input_)
         loss = 0
-        decoder_input = self.decoder_model.initial_input(len(idxs))
-        t = targets[0].transpose(0,1)
-        for ti in range(t.size(0)):
-            decoder_output = self.decoder_model(input_, encoder_output, decoder_input)
-            
+
         results = ListTable()
+        decoder_input = self.decoder_model.initial_input(len(idxs))
+        for ti in range(max_decoder_len):
+            decoder_output = self.decoder_model(input_, encoder_output, decoder_input)
+            decoder_output, decoder_input = self.process_output(ti, decoder_output, input_)
+            decoder_outputs.append(decoder_output)
+
         decoder_outputs = torch.stack(decoder_outputs)
-        results.extend( self.repr_function(decoder_outputs, self.feed, batch_index) )
+        result = self.repr_function(decoder_outputs, input_)
+        results.extend(result)
         return decoder_outputs, results
