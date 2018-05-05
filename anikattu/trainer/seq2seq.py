@@ -69,11 +69,9 @@ class Trainer(Trainer):
         for epoch in range(self.epochs):
             log.critical('memory consumed : {}'.format(memory_consumed()))         
 
-            """
             if self.do_every_checkpoint(epoch) == FLAGS.STOP_TRAINING:
                 log.info('loss trend suggests to stop training')
                 return
-            """
             
             for j in tqdm(range(self.feeder.train.num_batch)):
                 log.debug('{}th batch'.format(j))
@@ -90,14 +88,12 @@ class Trainer(Trainer):
                     decoder_output = self.decoder_model(input_, encoder_output, decoder_input)
                     loss_, decoder_input = self.loss_function(ti, decoder_output, input_)
                     loss += loss_
-                    loss.backward()
                     
-                self.train_loss.append(loss.data[0])
-
-
+                loss.backward()
                 self.encoder_optimizer.step()
                 self.decoder_optimizer.step()
-                            
+                self.train_loss.append(loss.data[0])
+                
             log.info('-- {} -- loss: {}'.format(epoch, self.train_loss))            
             
             for m in self.metrics:
@@ -119,13 +115,13 @@ class Trainer(Trainer):
             encoder_output = self.encoder_model(input_)
             accuracy = 0
             loss = 0
-            decoder_input = self.decoder_model.initial_input(len(idxs)), None
+            decoder_input = self.decoder_model.initial_input(len(idxs))
             t = targets[0].transpose(0,1)
             for ti in range(t.size(0)):
-                decoder_output, hidden = self.decoder_model(encoder_output, decoder_input, input_)
-                loss += self.loss_function(ti, decoder_output, input_)
+                decoder_output = self.decoder_model(input_, encoder_output, decoder_input)
+                loss_, decoder_input = self.loss_function(ti, decoder_output, input_)
+                loss += loss_
                 accuracy += self.accuracy_function(ti, decoder_output, input_)
-                decoder_input = decoder_output.max(1)[1], hidden
                 
             self.test_loss.cache(loss.data[0])
             self.accuracy.cache(accuracy.data[0]/ti)
@@ -135,7 +131,11 @@ class Trainer(Trainer):
                 self.precision.append(precision)
                 self.recall.append(recall)
                 self.f1score.append(f1score)
-                
+
+
+        self.encoder_model.train()
+        self.decoder_model.train()
+            
         log.info('-- {} -- loss: {}, accuracy: {}'.format(epoch,
                                                           self.test_loss.epoch_cache,
                                                           self.accuracy.epoch_cache))
@@ -146,13 +146,15 @@ class Trainer(Trainer):
 
         self.test_loss.clear_cache()
         self.accuracy.clear_cache()
-        if early_stopping:
-            return self.loss_trend()
-
         if self.best_model[0] < self.accuracy.avg:
             self.best_model = (self.accuracy.avg, (self.encoder_model.state_dict(), self.decoder_model.state_dict()))
             self.save_best_model()
-    
+
+        if early_stopping:
+            return self.loss_trend()
+
+
+            
 class Predictor(object):
     def __init__(self, model=(None,None),
                  feed = None,
@@ -176,13 +178,11 @@ class Predictor(object):
         input_ = self.feed.next_batch()
         idxs, inputs, targets = input_
         encoder_output = self.encoder_model(input_)
-        decoder_input = self.decoder_model.initial_input(len(idxs)), None
+        loss = 0
+        decoder_input = self.decoder_model.initial_input(len(idxs))
         t = targets[0].transpose(0,1)
         for ti in range(t.size(0)):
-            decoder_output, hidden = self.decoder_model(encoder_output, decoder_input, input_)
-            decoder_input = decoder_output.max(1)[1]
-            decoder_outputs.append(decoder_input)
-            decoder_input = decoder_input, hidden
+            decoder_output = self.decoder_model(input_, encoder_output, decoder_input)
             
         results = ListTable()
         decoder_outputs = torch.stack(decoder_outputs)
