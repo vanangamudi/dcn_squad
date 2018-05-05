@@ -123,11 +123,11 @@ torch utils
 """
 
 
-def LongVar(array):
-    return Var(array).long()
+def LongVar(array, requires_grad=False):
+    return Var(array, requires_grad).long()
 
-def Var(array):
-    ret =  Variable(torch.Tensor(array))
+def Var(array, requires_grad=False):
+    ret =  Variable(torch.Tensor(array), requires_grad=requires_grad)
     if Config.cuda:
         ret = ret.cuda()
 
