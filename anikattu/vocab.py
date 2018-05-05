@@ -14,6 +14,7 @@ class Vocab:
 
         vocab = sorted(vocab.items(), key=lambda x: x[1])
         if max_size: vocab = vocab[:max_size]
+        vocab = [ w for w,c in vocab]
         index2word = vocab
         if sort_key:
             index2word = sorted(index2word, key=sort_key)
@@ -25,14 +26,14 @@ class Vocab:
                  .format(len(self.index2word), len(self.word2index)))
         
     def __getitem__(self, key):
-        if type(key) == int:
-            return self.index2word[key]
-        elif type(key) == str:
+        if type(key) == str:
             if key in self.word2index:
                 return self.word2index[key]
             else:
                 return self.word2index['UNK']
-
+        else: #type(key) == int:
+            return self.index2word[key]
+        
 
     def __len__(self):
         return len(self.index2word)
