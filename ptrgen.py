@@ -56,7 +56,7 @@ def load_squad_data(data_path, ids, max_para_len=600, max_ans_len=10):
             c for c in unicodedata.normalize('NFKD', s)
             if unicodedata.category(c) != 'Mn'
         )
-        return s.replace("``", '"').replace("''", '"')
+        return s.replace("``", '"').replace("''", '"').lower()
 
     try:
         for aid, article in enumerate(tqdm(dataset['data'])):
@@ -100,31 +100,40 @@ def load_squad_data(data_path, ids, max_para_len=600, max_ans_len=10):
 
 
 # ## Loss and accuracy function
-def loss(decoding_index, output, batch, loss_function=nn.NLLLoss(), scale=1, *args, **kwargs):
+def process_output(decoding_index, output, batch,  *args, **kwargs):
     indices, (context, question), (answer, extvocab_context, target, extvocab_size) = batch
     pgen, vocab_dist, hidden, attn_dist = output
-    targeti = target[:, decoding_index]
-
-    batch_size, vocab_size = vocab_dist.size()
+    
     vocab_dist, attn_dist = pgen * vocab_dist, (1-pgen) * attn_dist
-    zeros = Var(torch.zeros(batch_size, extvocab_size))
-    vocab_dist = torch.cat([vocab_dist, zeros], dim=-1)
-    output     = vocab_dist.scatter_add_(1, extvocab_context, attn_dist)
-    output     = (targeti > 0).unsqueeze(-1).expand_as(output).float() * output
-    return loss_function(F.log_softmax(output), targeti), (answer[:, decoding_index], hidden)
+    batch_size, vocab_size = vocab_dist.size()
+    
+    output  = vocab_dist
+    if extvocab_size:
+        zeros      = Var( torch.zeros(batch_size, extvocab_size) )
+        vocab_dist = torch.cat( [vocab_dist, zeros], dim=-1 )
+        output     = vocab_dist.scatter_add_(1, extvocab_context, attn_dist)
+
+    return output
+
+def loss(decoding_index, output, batch, loss_function=nn.NLLLoss(), scale=1, *args, **kwargs):
+    _, __, (answer, ___ , target, ____ ) = batch
+    pgen, vocab_dist, hidden, attn_dist = output
+
+    output = process_output(decoding_index, output, batch)
+    output = (target[:, decoding_index] > 0).unsqueeze(-1).expand_as(output).float() * output
+    output = F.log_softmax(output, dim=-1)
+
+    return loss_function(output, target[:, decoding_index]), (answer[:, decoding_index], hidden)
 
 def accuracy(decoding_index, output, batch, *args, **kwargs):
-    indices, (context, question), (answer, extvocab_context, target, extvocab_size) = batch
+    _, __, (answer, ___ , target, ____ ) = batch
     pgen, vocab_dist, hidden, attn_dist = output
-    targeti = target[:, decoding_index]
+    
+    output = process_output(decoding_index, output, batch)
+    output = (target[:, decoding_index] > 0).unsqueeze(-1).expand_as(output).float() * output
+    output = F.log_softmax(output, dim=-1)
 
-    batch_size, vocab_size = vocab_dist.size()
-    vocab_dist, attn_dist = pgen * vocab_dist, (1-pgen) * attn_dist
-    zeros = Var(torch.zeros(batch_size, extvocab_size))
-    vocab_dist = torch.cat([vocab_dist, zeros], dim=-1)
-    output     = vocab_dist.scatter_add_(1, extvocab_context, attn_dist)
-    output     = (targeti > 0).unsqueeze(-1).expand_as(output).float() * output
-    return (output.max(1)[1] == targeti).float().sum()/output.size(0)
+    return (output.max(1)[1] == target[:, decoding_index]).float().sum()/output.size(0)
         
 
 def f1score(decoding_index, output, batch, *args, **kwargs):
@@ -149,25 +158,36 @@ def f1score(decoding_index, output, batch, *args, **kwargs):
         
     return p, r, f1
 
+def process_predictor_output(decoding_index, output, batch, UNK):
+    indices, (context, question), __  = batch
+    pgen, vocab_dist, hidden, attn_dist = output    
+    output = process_output(decoding_index, output, batch)
+    output = F.log_softmax(output, dim=-1)
+    output = output.max(1)[1]
+    
+    return output, (output.masked_fill_(output > vocab_dist.size(1), UNK), hidden)
 
-def repr_function(output, feed, batch_index, VOCAB, raw_samples):
+def repr_function(output, batch, VOCAB, raw_samples):
+    indices, (context, question), (answer, extvocab_context, target, extvocab_size) = batch
+    
     results = []
-    output = output.transpose(0, 1).data.tolist()
-    indices, __, __ = feed.nth_batch(batch_index)
+    output = output.transpose(0,1)
+    for idx, c, q, a, o in zip(indices, context, question, answer, output):
 
-    for idx, op in zip(indices, output):
-        sample = feed.data_dict[idx]
-        _op = []
-        for i in op:
-            if i < len(sample.context):
-                _op.append(i)
-                
-        results.append([ ' '.join(sample.context),
-                         ' '.join(sample.q),
-                         ' '.join(sample.context[i] for i in sample.a_positions),
-                         ' '.join(sample.context[i] for i in _op),
-        ])
+        c = ' '.join([VOCAB[i] for i in c])
+        q = ' '.join([VOCAB[i] for i in q])
+        a = ' '.join([ extvocab_context[i - len(VOCAB)]
+               if i >= len(VOCAB)
+               else VOCAB[i]
+               for i in a])
 
+        o = ' '.join([ extvocab_context[i - len(VOCAB)]
+                           if i >= len(VOCAB)
+                           else VOCAB[i]
+                           for i in o])
+        
+        results.append([ c, q, a, o ])
+        
     return results
 
 def batchop(datapoints, WORD2INDEX, *args, **kwargs):
@@ -286,11 +306,11 @@ class Attention(Base):
     def __init__(self, Config, name, size):
         super(Attention, self).__init__(Config, name)
         self.size = size
-        self.attn =  nn.Parameter(torch.zeros(self.size, self.size))
+        self.attn =  nn.Linear(self.size, self.size, bias=False)
         
     def forward(self, context, query):        
-        attn = self.__( self.attn.unsqueeze(0), 'attn')
-        attn = self.__( torch.bmm(query.unsqueeze(1), attn.expand(context.size(1), *self.attn.size())), 'attn')
+        attn = self.__( self.attn.weight.unsqueeze(0), 'attn')
+        attn = self.__( torch.bmm(query.unsqueeze(1), attn.expand(context.size(1), *self.attn.weight.size())), 'attn')
         attn = self.__( torch.bmm(attn, context.transpose(0,1).transpose(1, 2)), 'attn').squeeze(1)
 
         return attn
@@ -387,7 +407,7 @@ def experiment(VOCAB, raw_samples, datapoints=[[], []], eons=1000, epochs=10, ch
         _batchop = partial(batchop, WORD2INDEX=VOCAB)
         train_feed     = DataFeed(name, datapoints[0], batchop=_batchop, batch_size=16)
         test_feed      = DataFeed(name, datapoints[1], batchop=_batchop, batch_size=16)
-        predictor_feed = DataFeed(name, datapoints[1], batchop=_batchop, batch_size=16)
+        predictor_feed = DataFeed(name, datapoints[1], batchop=_batchop, batch_size=1)
 
         _loss = partial(loss, loss_function=nn.NLLLoss())
         trainer = Trainer(name=name,
@@ -397,13 +417,16 @@ def experiment(VOCAB, raw_samples, datapoints=[[], []], eons=1000, epochs=10, ch
                           feeder = Feeder(train_feed, test_feed))
 
         _repr_function=partial(repr_function, VOCAB=VOCAB, raw_samples=raw_samples)
-        predictor = Predictor(model=(encoder, decoder),
-                              feed=predictor_feed, repr_function=_repr_function)
+        _process_predictor_output = partial(process_predictor_output, UNK=VOCAB['UNK'])
+        predictor = Predictor(model = (encoder, decoder),
+                              feed  = predictor_feed,
+                              repr_function  = _repr_function,
+                              process_output = _process_predictor_output)
 
         dump = open('results/experiment_attn.csv', 'w')        
         for e in range(eons):
             log.info('on {}th eon'.format(e))
-            """
+
             dump.write('#========================after eon: {}\n'.format(e))
             results = ListTable()
             for ri in tqdm(range(predictor_feed.num_batch//10)):
@@ -412,7 +435,7 @@ def experiment(VOCAB, raw_samples, datapoints=[[], []], eons=1000, epochs=10, ch
                 
             dump.write(repr(results))
             dump.flush()
-            """
+
             if not trainer.train():
                 raise Exception
 
@@ -432,8 +455,7 @@ if __name__ == '__main__':
     if sys.argv[1]:
         log.addFilter(CMDFilter(sys.argv[1]))
 
-    flush = False
-    if flush:
+    if Config.flush:
         log.info('flushing...')
         ids = tuple((Sample._fields.index('squad_id'),))
         dataset, vocabulary = load_squad_data('dataset/train-v1.1.json', ids)
@@ -447,9 +469,9 @@ if __name__ == '__main__':
     log.info('dataset[:10]: {}'.format(pformat(dataset[0])))
     log.info('vocabulary: {}'.format(len(vocabulary)))
     
-    VOCAB = Vocab(vocabulary, VOCAB, max_size=50000)
+    VOCAB = Vocab(vocabulary, VOCAB, max_size=Config.vocab_limit)
     if 'train' in sys.argv:
-        labelled_samples = [d for d in dataset if len(d.a_positions) < 2000] #[:100]
+        labelled_samples = [d for d in dataset if len(d.a) < 2000] #[:100]
         pivot = int( Config().split_ratio * len(labelled_samples) )
         random.shuffle(labelled_samples)
         train_set, test_set = labelled_samples[:pivot], labelled_samples[pivot:]
