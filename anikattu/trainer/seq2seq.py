@@ -69,10 +69,12 @@ class Trainer(Trainer):
         for epoch in range(self.epochs):
             log.critical('memory consumed : {}'.format(memory_consumed()))         
 
+            """
             if self.do_every_checkpoint(epoch) == FLAGS.STOP_TRAINING:
                 log.info('loss trend suggests to stop training')
                 return
-
+            """
+            
             for j in tqdm(range(self.feeder.train.num_batch)):
                 log.debug('{}th batch'.format(j))
                 self.encoder_optimizer.zero_grad()
@@ -82,16 +84,17 @@ class Trainer(Trainer):
                 idxs, inputs, targets = input_
                 encoder_output = self.encoder_model(input_)
                 loss = 0
-                decoder_input = self.decoder_model.initial_input(len(idxs)), None
+                decoder_input = self.decoder_model.initial_input(len(idxs))
                 t = targets[0].transpose(0,1)
                 for ti in range(t.size(0)):
                     decoder_output = self.decoder_model(input_, encoder_output, decoder_input)
                     loss_, decoder_input = self.loss_function(ti, decoder_output, input_)
                     loss += loss_
+                    loss.backward()
                     
                 self.train_loss.append(loss.data[0])
 
-                loss.backward()
+
                 self.encoder_optimizer.step()
                 self.decoder_optimizer.step()
                             
