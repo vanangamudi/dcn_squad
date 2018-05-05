@@ -103,27 +103,28 @@ def load_squad_data(data_path, ids, max_para_len=600, max_ans_len=10):
 def loss(decoding_index, output, batch, loss_function=nn.NLLLoss(), scale=1, *args, **kwargs):
     indices, (context, question), (answer, extvocab_context, target, extvocab_size) = batch
     pgen, vocab_dist, hidden, attn_dist = output
-    print(target.size(), answer.size())
     targeti = target[:, decoding_index]
 
     batch_size, vocab_size = vocab_dist.size()
-    vocab_dist = torch.cat([vocab_dist, Var(torch.zeros(batch_size, extvocab_size))], dim=-1)
+    vocab_dist, attn_dist = pgen * vocab_dist, (1-pgen) * attn_dist
+    zeros = Var(torch.zeros(batch_size, extvocab_size))
+    vocab_dist = torch.cat([vocab_dist, zeros], dim=-1)
     output     = vocab_dist.scatter_add_(1, extvocab_context, attn_dist)
     output     = (targeti > 0).unsqueeze(-1).expand_as(output).float() * output
-    print(output.max(1)[1], target)
-    return loss_function(output, targeti), (answer[:, decoding_index], hidden)
+    return loss_function(F.log_softmax(output), targeti), (answer[:, decoding_index], hidden)
 
-def accuracy(decoding_index, output, batch, *args, **kwargs):    
-    indices, (context, question), (target, extvocab_context, answer, extvocab_size) = batch
-    target = target.transpose(0,1)[decoding_index]
+def accuracy(decoding_index, output, batch, *args, **kwargs):
+    indices, (context, question), (answer, extvocab_context, target, extvocab_size) = batch
     pgen, vocab_dist, hidden, attn_dist = output
+    targeti = target[:, decoding_index]
 
     batch_size, vocab_size = vocab_dist.size()
-
-    vocab_dist = torch.cat(vocab_dist, torch.zeros(batch_size, extvocab_size), dim=1)
+    vocab_dist, attn_dist = pgen * vocab_dist, (1-pgen) * attn_dist
+    zeros = Var(torch.zeros(batch_size, extvocab_size))
+    vocab_dist = torch.cat([vocab_dist, zeros], dim=-1)
     output     = vocab_dist.scatter_add_(1, extvocab_context, attn_dist)
-    
-    return (output.max(1)[1] == target[decoding_index]).float().sum()/output_size(0)
+    output     = (targeti > 0).unsqueeze(-1).expand_as(output).float() * output
+    return (output.max(1)[1] == targeti).float().sum()/output.size(0)
         
 
 def f1score(decoding_index, output, batch, *args, **kwargs):
@@ -223,7 +224,7 @@ class Base(nn.Module):
         self.size_log = logging.getLogger(size_log_name)
         self.size_log.info('size_log')
         self.log.setLevel(logging.INFO)
-        self.size_log.setLevel(logging.DEBUG)
+        self.size_log.setLevel(logging.INFO)
         
     def cpu(self):
         super(Base, self).cpu()
@@ -283,7 +284,7 @@ class Encoder(Base):
 
 class Attention(Base):
     def __init__(self, Config, name, size):
-        super().__init__(Config, name)
+        super(Attention, self).__init__(Config, name)
         self.size = size
         self.attn =  nn.Parameter(torch.zeros(self.size, self.size))
         
@@ -306,7 +307,9 @@ class PtrDecoder(Base):
         self.dropout = nn.Dropout(Config.dropout)
 
         self.project_query = nn.Linear(2 * self.hidden_size, self.hidden_size)
+
         self.attn = Attention(Config, self.name('attn'), self.hidden_size)
+        self.add_module('attn', self.attn)
         
         self.pgen_input   = nn.Linear(self.embed.embedding_dim, self.hidden_size)
         self.pgen_hidden  = nn.Linear(self.hidden_size, self.hidden_size)
@@ -316,6 +319,14 @@ class PtrDecoder(Base):
         
         self.decode = nn.GRUCell(self.embed.embedding_dim + self.hidden_size, self.hidden_size)
         self.project_output = nn.Linear(self.hidden_size, self.output_vocab_size)
+
+    def train(self, mode=True):
+        self.attn.train(mode)
+        super().train(mode)
+
+    def eval(self):
+        self.attn.eval()
+        super().eval()
         
     def initial_input(self, batch_size):
         decoder_input = LongVar([self.initial_decoder_input]).expand(batch_size)
@@ -436,7 +447,7 @@ if __name__ == '__main__':
     log.info('dataset[:10]: {}'.format(pformat(dataset[0])))
     log.info('vocabulary: {}'.format(len(vocabulary)))
     
-    VOCAB = Vocab(vocabulary, VOCAB)
+    VOCAB = Vocab(vocabulary, VOCAB, max_size=50000)
     if 'train' in sys.argv:
         labelled_samples = [d for d in dataset if len(d.a_positions) < 2000] #[:100]
         pivot = int( Config().split_ratio * len(labelled_samples) )
