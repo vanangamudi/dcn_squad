@@ -102,8 +102,8 @@ def load_squad_data(data_path, ids, max_para_len=600, max_ans_len=10):
 # ## Loss and accuracy function
 def process_output(decoding_index, output, batch,  *args, **kwargs):
     indices, (context, question), (answer, extvocab_context, target, extvocab_size) = batch
-    pgen, vocab_dist, hidden, attn_dist = output
-    
+    pgen, vocab_dist, hidden, attn_dist, coverage = output
+
     vocab_dist, attn_dist = pgen * vocab_dist, (1-pgen) * attn_dist
     batch_size, vocab_size = vocab_dist.size()
     
@@ -117,21 +117,21 @@ def process_output(decoding_index, output, batch,  *args, **kwargs):
 
 def loss(decoding_index, output, batch, loss_function=nn.NLLLoss(), scale=1, *args, **kwargs):
     _, __, (answer, ___ , target, ____ ) = batch
-    pgen, vocab_dist, hidden, attn_dist = output
-
+    pgen, vocab_dist, hidden, attn_dist, coverage = output
+    cov_loss = torch.sum(torch.min(attn_dist, coverage), 1)
+    
     output = process_output(decoding_index, output, batch)
-    output = (target[:, decoding_index] > 0).unsqueeze(-1).expand_as(output).float() * output
-    output = F.log_softmax(output, dim=-1)
-
-    return loss_function(output, target[:, decoding_index]), (answer[:, decoding_index], hidden)
+    probs = output.gather(1, target[:, decoding_index].unsqueeze(1)).squeeze()
+    loss_ = -torch.log(probs + 1e-9) * (target[:, decoding_index] > 0).float()
+    return (loss_function(F.log_softmax(output), target[:, decoding_index]) + Config.cov_lr * cov_loss).sum(), (answer[:, decoding_index], hidden, coverage)
+    #return (loss_ + Config.cov_lr * cov_loss).sum(), (answer[:, decoding_index], hidden, coverage)
 
 def accuracy(decoding_index, output, batch, *args, **kwargs):
     _, __, (answer, ___ , target, ____ ) = batch
-    pgen, vocab_dist, hidden, attn_dist = output
+    pgen, vocab_dist, hidden, attn_dist, coverage = output
     
     output = process_output(decoding_index, output, batch)
     output = (target[:, decoding_index] > 0).unsqueeze(-1).expand_as(output).float() * output
-    output = F.log_softmax(output, dim=-1)
 
     return (output.max(1)[1] == target[:, decoding_index]).float().sum()/output.size(0)
         
@@ -160,18 +160,18 @@ def f1score(decoding_index, output, batch, *args, **kwargs):
 
 def process_predictor_output(decoding_index, output, batch, UNK):
     indices, (context, question), __  = batch
-    pgen, vocab_dist, hidden, attn_dist = output    
+    pgen, vocab_dist, hidden, attn_dist, coverage = output
     output = process_output(decoding_index, output, batch)
     output = F.log_softmax(output, dim=-1)
     output = output.max(1)[1]
     
-    return output, (output.masked_fill_(output > vocab_dist.size(1), UNK), hidden)
+    return output, (output.masked_fill_(output > vocab_dist.size(1), UNK), hidden, coverage)
 
 def repr_function(output, batch, VOCAB, raw_samples):
     indices, (context, question), (answer, extvocab_context, target, extvocab_size) = batch
     
     results = []
-    output = output.transpose(0,1)
+    output = output.transpose(0,1).cpu().numpy()
     for idx, c, q, a, o in zip(indices, context, question, answer, output):
 
         c = ' '.join([VOCAB[i] for i in c])
@@ -212,15 +212,15 @@ def batchop(datapoints, WORD2INDEX, *args, **kwargs):
         answer.append([WORD2INDEX[w] for w in d.a])
 
         oov = build_oov(d, WORD2INDEX)
-        extvocab_context.append([ oov.index(w) + len(WORD2INDEX)
-                                  if WORD2INDEX[w] == UNK
-                                  else WORD2INDEX[w]
-                                  for w in d.context] + [WORD2INDEX['EOS']])
-
-        extvocab_answer.append([ oov.index(w) + len(WORD2INDEX)
-                        if WORD2INDEX[w] == UNK
-                        else WORD2INDEX[w]
-                        for w in d.a] + [WORD2INDEX['EOS']])
+        extvocab_context.append(
+            [ oov.index(w) + len(WORD2INDEX) if WORD2INDEX[w] == UNK else WORD2INDEX[w]
+              for w in d.context]
+            + [WORD2INDEX['EOS']])
+        
+        extvocab_answer.append(
+            [ oov.index(w) + len(WORD2INDEX) if WORD2INDEX[w] == UNK else WORD2INDEX[w]
+                                 for w in d.a]
+            + [WORD2INDEX['EOS']])
 
         extvocab_size = max(extvocab_size, len(oov))
         
@@ -275,7 +275,7 @@ class Encoder(Base):
         self.hidden_size = Config.hidden_size
         self.embed = nn.Embedding(input_vocab_size, self.embed_size)
         
-        self.encode_context = nn.GRU(self.embed.embedding_dim, self.hidden_size, bidirectional=True)
+        self.encode_context  = nn.GRU(self.embed.embedding_dim, self.hidden_size, bidirectional=True)
         self.encode_question = nn.GRU(self.embed.embedding_dim, self.hidden_size, bidirectional=True)
         self.dropout = nn.Dropout(0.1)
 
@@ -307,11 +307,15 @@ class Attention(Base):
         super(Attention, self).__init__(Config, name)
         self.size = size
         self.attn =  nn.Linear(self.size, self.size, bias=False)
+        self.covr =  nn.Linear(        1, self.size, bias=False)
         
-    def forward(self, context, query):        
+    def forward(self, context, query, coverage):
+        seq_len, batch_size, hidden_size = context.size()
+        coverage = self.__( self.covr(coverage.view(-1, 1)).view(batch_size, seq_len, self.size), 'coverage')
+        coverage = coverage + context.transpose(0, 1)
         attn = self.__( self.attn.weight.unsqueeze(0), 'attn')
         attn = self.__( torch.bmm(query.unsqueeze(1), attn.expand(context.size(1), *self.attn.weight.size())), 'attn')
-        attn = self.__( torch.bmm(attn, context.transpose(0,1).transpose(1, 2)), 'attn').squeeze(1)
+        attn = self.__( torch.bmm(attn, coverage.transpose(1, 2)), 'attn').squeeze(1)
 
         return attn
     
@@ -350,40 +354,45 @@ class PtrDecoder(Base):
         
     def initial_input(self, batch_size):
         decoder_input = LongVar([self.initial_decoder_input]).expand(batch_size)
-        return decoder_input, None
+        return decoder_input, None, None
         
     def forward(self, input_, encoder_output, decoder_input):
         context_states, question_states = self.__( encoder_output, 'encoder_output')
         seq_len, batch_size, hidden_size = context_states.size()
         dropout = self.dropout
-        decoder_input, hidden = decoder_input
+        decoder_input, hidden, coverage = decoder_input
         
         decoder_input  = self.__(  self.embed(decoder_input), 'decoder_input')
         if not isinstance(hidden, torch.Tensor):
             hidden = context_states[-1]
+
+        if not isinstance(coverage, torch.Tensor):
+            coverage = Var(torch.zeros(batch_size, seq_len))
             
         #combine question and current hidden state and project
         query = self.__( torch.cat([question_states[-1], hidden], dim=-1), 'query')
         query = self.__( self.project_query(query), 'projected query')
         query = F.tanh(query)
         
-        attn_dist = self.__( self.attn(context_states, query), 'attention_dist')
+        attn_dist = self.__( self.attn(context_states, query, coverage), 'attention_dist')
+        attn_dist = F.softmax(attn_dist)
+        coverage = coverage  + attn_dist / attn_dist.sum(1).unsqueeze(1)
         context_states = context_states.transpose(0,1)
         attn = self.__( F.sigmoid(attn_dist).unsqueeze(-1).expand_as(context_states) * context_states, 'attn')
         attn = self.__( torch.sum(attn, dim=1), 'attn')
 
         pgen_vector = self.pgen_input(decoder_input) + self.pgen_hidden(hidden) + self.pgen_attn(attn)
         pgen_vector = self.project_pgen(pgen_vector)
-        pgen        = self.squash_pgen(pgen_vector)
+        pgen        = F.softmax(self.squash_pgen(pgen_vector), dim=-1)
 
         decoder_input = F.tanh(torch.cat([decoder_input, attn], dim=-1))
         hidden = F.tanh(hidden)
         hidden = self.__( self.decode(decoder_input, hidden), 'decoder_output')
         vocab_dist = self.__( self.project_output(F.tanh(hidden)), 'vocab_dist')
         
-        return pgen, vocab_dist, hidden, attn_dist
+        return pgen, F.log_softmax(vocab_dist), hidden, F.log_softmax(attn_dist), coverage
             
-def experiment(VOCAB, raw_samples, datapoints=[[], []], eons=1000, epochs=10, checkpoint=5):
+def experiment(VOCAB, raw_samples, datapoints=[[], []], eons=1000, epochs=1, checkpoint=1):
     try:
         encoder =  Encoder(Config(), 'encoder', len(VOCAB))
         decoder =  PtrDecoder(Config(), 'decoder', encoder.embed, VOCAB['GO'], len(VOCAB))
@@ -426,7 +435,7 @@ def experiment(VOCAB, raw_samples, datapoints=[[], []], eons=1000, epochs=10, ch
         dump = open('results/experiment_attn.csv', 'w')        
         for e in range(eons):
             log.info('on {}th eon'.format(e))
-
+            
             dump.write('#========================after eon: {}\n'.format(e))
             results = ListTable()
             for ri in tqdm(range(predictor_feed.num_batch//10)):
@@ -435,7 +444,7 @@ def experiment(VOCAB, raw_samples, datapoints=[[], []], eons=1000, epochs=10, ch
                 
             dump.write(repr(results))
             dump.flush()
-
+            
             if not trainer.train():
                 raise Exception
 
@@ -471,7 +480,7 @@ if __name__ == '__main__':
     
     VOCAB = Vocab(vocabulary, VOCAB, max_size=Config.vocab_limit)
     if 'train' in sys.argv:
-        labelled_samples = [d for d in dataset if len(d.a) < 2000] #[:100]
+        labelled_samples = [d for d in dataset[:10000] if len(d.a) < 3] #[:100]
         pivot = int( Config().split_ratio * len(labelled_samples) )
         random.shuffle(labelled_samples)
         train_set, test_set = labelled_samples[:pivot], labelled_samples[pivot:]
