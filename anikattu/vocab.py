@@ -7,10 +7,16 @@ log.setLevel(logging.INFO)
 
 class Vocab:
 
-    def __init__(self, vocab, special_tokens, max_size=None, sort_key=None):
+    def __init__(self, vocab, special_tokens, max_size=None, sort_key=None, freq_threshold=1):
 
         log.info('Constructiong vocabuluary object...')
         self.vocab = vocab
+
+        if isinstance(freq_threshold, int):
+            vocab = {w:c for w, c in vocab.items() if c >= freq_threshold}
+        else:
+            l, h = freq_threshold
+            vocab = {w:c for w, c in vocab.items() if c <= l or c >= h}
 
         vocab = sorted(vocab.items(), key=lambda x: x[1], reverse=True)
         if max_size: vocab = vocab[:max_size]
