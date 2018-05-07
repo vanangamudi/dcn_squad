@@ -12,7 +12,7 @@ class Vocab:
         log.info('Constructiong vocabuluary object...')
         self.vocab = vocab
 
-        vocab = sorted(vocab.items(), key=lambda x: x[1])
+        vocab = sorted(vocab.items(), key=lambda x: x[1], reverse=True)
         if max_size: vocab = vocab[:max_size]
         vocab = [ w for w,c in vocab]
         index2word = vocab
