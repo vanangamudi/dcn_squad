@@ -249,8 +249,8 @@ class Encoder(Base):
     
     def forward(self, context, question):
 
-        context = LongVar(Config, context)
-        question = LongVar(Config, question)
+        context = LongVar(context)
+        question = LongVar(question)
         
         batch_size, context_size  = context.size()
         _         , question_size = question.size()
@@ -438,15 +438,13 @@ def experiment(VOCAB, raw_samples, datapoints=[[], []], eons=1000, epochs=10, ch
             dump.close()
             log.info('on {}th eon'.format(e))
 
-            """
             with open('results/experiment_attn.csv', 'a') as dump:
                 results = ListTable()
-                for ri in tqdm(range(predictor_feed.num_batch)):
+                for ri in tqdm(range(predictor_feed.num_batch//100)):
                     output, _results = predictor.predict(ri)
                     results.extend(_results)
                 dump.write(repr(results))
             log.info('on {}th eon training....'.format(e))
-            """
 
             if not trainer.train():
                 raise Exception
