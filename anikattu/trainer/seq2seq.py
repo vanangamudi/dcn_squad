@@ -53,8 +53,8 @@ class Trainer(Trainer):
             self.encoder_optimizer, self.decoder_optimizer = optimizer
         else:
             self.encoder_optimizer, self.decoder_optimizer = (
-                optim.SGD(self.encoder_model.parameters(),lr=1e-4, momentum=0.01),
-                optim.SGD(self.decoder_model.parameters(),lr=1e-4, momentum=0.01)
+                optim.SGD(self.encoder_model.parameters(),lr=0.05, momentum=0.1),
+                optim.SGD(self.decoder_model.parameters(),lr=0.05, momentum=0.1)
             )
 
         self.__build_stats(directory)
@@ -85,7 +85,7 @@ class Trainer(Trainer):
                 idxs, inputs, targets = input_
                 encoder_output = self.encoder_model(input_)
                 loss = 0
-                decoder_input = self.decoder_model.initial_input(len(idxs))
+                decoder_input = self.decoder_model.initial_input(input_, encoder_output)
                 t = targets[0].transpose(0,1)
                 for ti in range(t.size(0)):
                     decoder_output = self.decoder_model(input_, encoder_output, decoder_input)
@@ -93,6 +93,9 @@ class Trainer(Trainer):
                     loss += loss_
                     
                 loss.backward()
+                
+                #nn.utils.clip_grad_norm(self.encoder_model.parameters(), Config.max_grad_norm)
+                #nn.utils.clip_grad_norm(self.decoder_model.parameters(), Config.max_grad_norm)
                 self.encoder_optimizer.step()
                 self.decoder_optimizer.step()
                 self.train_loss.append(loss.data[0])
@@ -116,26 +119,27 @@ class Trainer(Trainer):
             input_ = self.feeder.test.next_batch()
             idxs, inputs, targets = input_
             encoder_output = self.encoder_model(input_)
-            accuracy = 0
-            loss = 0
-            decoder_input = self.decoder_model.initial_input(len(idxs))
+            loss, accuracy = 0, 0
+            decoder_outputs = []            
+            decoder_input = self.decoder_model.initial_input(input_, encoder_output)
             t = targets[0].transpose(0,1)
             for ti in range(t.size(0)):
                 decoder_output = self.decoder_model(input_, encoder_output, decoder_input)
                 loss_, decoder_input = self.loss_function(ti, decoder_output, input_)
                 loss += loss_
                 accuracy += self.accuracy_function(ti, decoder_output, input_)
-                
+                decoder_outputs.append(decoder_input)
+                        
             self.test_loss.cache(loss.data[0])
+            if ti == 0: ti = 1
             self.accuracy.cache(accuracy.data[0]/ti)
 
             if self.f1score_function:
-                precision, recall, f1score = self.f1score_function(output, input_)
+                precision, recall, f1score = self.f1score_function(decoder_outputs, input_)
                 self.precision.append(precision)
                 self.recall.append(recall)
                 self.f1score.append(f1score)
-
-
+                
         self.encoder_model.train()
         self.decoder_model.train()
             
@@ -182,12 +186,12 @@ class Predictor(object):
         loss = 0
 
         results = ListTable()
-        decoder_input = self.decoder_model.initial_input(len(idxs))
+        decoder_input = self.decoder_model.initial_input(input_, encoder_output)
         for ti in range(max_decoder_len):
             decoder_output = self.decoder_model(input_, encoder_output, decoder_input)
             decoder_output, decoder_input = self.process_output(ti, decoder_output, input_)
             decoder_outputs.append(decoder_output)
-
+                            
         decoder_outputs = torch.stack(decoder_outputs)
         result = self.repr_function(decoder_outputs, input_)
         results.extend(result)
