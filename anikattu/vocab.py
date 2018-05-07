@@ -17,7 +17,7 @@ class Vocab:
         else:
             l, h = freq_threshold
             vocab = {w:c for w, c in vocab.items() if c <= l or c >= h}
-            
+
         vocab = sorted(vocab.items(), key=lambda x: x[1], reverse=True)
         if max_size: vocab = vocab[:max_size]
         vocab = [ w for w,c in vocab]

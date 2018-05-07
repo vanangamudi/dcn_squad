@@ -60,6 +60,10 @@ class TokenString(list):
     def __iter__(self):
         return self.tokenized_string.__iter__()
 
+    def __add__(self, other):
+        assert self.tokenize == other.tokenize, 'tokenstring created from different tokenizers are not supported yet'
+        return TokenString(other.tokenized_string + self.tokenized_string, self.tokenize)
+    
     def index(self, subspan, start_at=0, stop_at=None):
         watchdog = 0
         if not stop_at:
