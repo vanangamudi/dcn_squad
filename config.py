@@ -9,16 +9,18 @@ class Base(metaclass=ConfigMeta):
 
 class Config(Base):
     split_ratio = 0.90
-    input_vocab_size = 30000
-    hidden_size = 100
-    embed_size = 100
+    hidden_size = 200
+    embed_size = 200
     batch_size = 2
     pooling_size = 8
     max_iter = 4
     dropout = 0.1
     cuda = True
     tqdm = True
-    flush = False
+    flush = True
+    vocab_limit= 80000
+    cov_lr = 1
+    max_grad_norm=2.0
 
     class Log(Base):
         class _default(Base):
